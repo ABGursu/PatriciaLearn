@@ -1389,13 +1389,16 @@ void iterative_deepen(
     
     if (exp) {
       // Collect all entries that meet min depth requirement with their quality
+      // Using positional quality calculation with lookahead (like HypnoS)
       std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
       const auto* temp = exp;
       
       while (temp) {
         if (temp->depth >= static_cast<int32_t>(expBookMinDepth)) {
-          int q = temp->quality(evalImportance);
-          if (q > 0) {
+          // Use positional quality with lookahead
+          auto [q, maybeDraw] = temp->quality_positional(position, evalImportance, 
+            [](Position& pos, uint16_t mv) { make_move(pos, static_cast<Move>(mv)); });
+          if (q > 0 && !maybeDraw) {
             qualityList.emplace_back(temp, q);
           }
         }

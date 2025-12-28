@@ -8,10 +8,20 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <unordered_set>
 #include <vector>
+#include "sparsehash/dense_hash_set"
 
 namespace Learning {
+
+// Wrapper class for google::dense_hash_map with automatic empty/deleted key setup
+template<typename TKey, typename TVal>
+class ExpHashMap : public google::dense_hash_map<TKey, TVal> {
+public:
+  ExpHashMap() {
+    google::dense_hash_map<TKey, TVal>::set_empty_key(EmptyKey);
+    google::dense_hash_map<TKey, TVal>::set_deleted_key(DeletedKey);
+  }
+};
 
 // Experience Book options (default values from HypnoS)
 bool experienceBookEnabled = false;
@@ -37,7 +47,8 @@ private:
   std::vector<ExpEntryEx*> _oldExpData;
 
   // Hash map: key -> ExpEntryEx* (linked list head)
-  std::unordered_map<uint64_t, ExpEntryEx*> _mainExp;
+  // Using google::dense_hash_map for better performance
+  ExpHashMap<uint64_t, ExpEntryEx*> _mainExp;
 
   bool _loading;
   std::atomic<bool> _abortLoading;
@@ -340,8 +351,10 @@ private:
       std::cout << "info string Saved " << allPositions << " position(s) and "
                 << allMoves << " moves to experience file: " << fn << std::endl;
     } else {
-      // Deduplicate new entries
-      std::unordered_set<uint64_t> seen;
+      // Deduplicate new entries using dense_hash_set for performance
+      google::dense_hash_set<uint64_t> seen;
+      seen.set_empty_key(EmptyKey);
+      seen.set_deleted_key(DeletedKey);
 
       // NOTE: do NOT cast e->move; read its raw bytes instead (exactly as HypnoS)
       auto km_hash = [](const ExpEntryEx* e) -> uint64_t {

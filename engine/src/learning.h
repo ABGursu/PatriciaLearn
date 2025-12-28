@@ -9,10 +9,18 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
+// Google dense_hash_map for optimized experience storage
+#include "sparsehash/dense_hash_map"
+
 namespace Learning {
+
+// Empty and deleted keys for dense_hash_map
+// These values should never appear as valid Zobrist keys
+constexpr uint64_t EmptyKey = 0ULL;
+constexpr uint64_t DeletedKey = 1ULL;
 
 // Minimum depth to store experience entries
 constexpr uint8_t MinDepth = 4;
@@ -97,6 +105,10 @@ struct ExpEntry {
 
 static_assert(sizeof(ExpEntry) == 24, "ExpEntry must be 24 bytes");
 
+// Forward declaration for use in ExpEntryEx template
+struct ExpEntryEx;
+const ExpEntryEx* probe(uint64_t key);
+
 // Extended entry with linked list support
 struct ExpEntryEx : ExpEntry {
   ExpEntryEx* next = nullptr;
@@ -109,19 +121,89 @@ struct ExpEntryEx : ExpEntry {
                       uint16_t c = 1)
       : ExpEntry(k, m, v, d, c), next(nullptr) {}
 
-  // Simple quality calculation for Experience Book
-  // Returns quality score based on count, depth, and value
+  // Simple quality calculation (non-positional, for basic sorting)
   int quality(int evalImportance = 5) const {
     constexpr int QualityEvalImportanceMax = 10;
     int q = static_cast<int>(count) * (QualityEvalImportanceMax - evalImportance);
-    
-    // Add value contribution based on evalImportance
     if (evalImportance > 0 && depth > 0) {
-      // Positive value = good for us, scale by depth importance
       q += (value * evalImportance) / (QualityEvalImportanceMax * 10);
     }
-    
     return q / QualityEvalImportanceMax;
+  }
+
+  // Positional quality calculation with lookahead (like HypnoS)
+  // Returns {quality_score, maybe_draw}
+  // pos: current position (will be copied for lookahead, not modified)
+  // evalImportance: 0-10, higher = more weight on evaluation differences
+  // MakeMoveFunc: function to apply move to position (e.g., make_move)
+  template<typename TPosition, typename MakeMoveFunc>
+  std::pair<int, bool> quality_positional(TPosition pos, int evalImportance, 
+                                          MakeMoveFunc make_move_fn) const {
+    constexpr int QualityEvalImportanceMax = 10;
+    constexpr int QualityExperienceMovesAhead = 10;
+    
+    bool maybeDraw = false;
+    int q = static_cast<int>(count) * (QualityEvalImportanceMax - evalImportance);
+    
+    if (evalImportance > 0) {
+      const int us = pos.color;
+      const int them = us ^ 1;
+      
+      std::array<int64_t, 2> sum = {0, 0};
+      std::array<int64_t, 2> weight = {0, 0};
+      
+      sum[us] = count;
+      weight[us] = 1;
+      
+      int me = us;
+      const ExpEntryEx* lastExp[2] = {nullptr, nullptr};
+      const ExpEntryEx* temp1 = this;
+      int moveCount = 0;
+      
+      while (temp1 && moveCount < QualityExperienceMovesAhead) {
+        lastExp[me] = temp1;
+        
+        // Apply move to position copy
+        uint16_t mv = static_cast<uint16_t>(temp1->move);
+        make_move_fn(pos, mv);
+        me ^= 1;
+        ++moveCount;
+        
+        // Simple draw detection: repetition via zobrist key
+        // (simplified - full detection would need game history)
+        
+        // Probe next position
+        temp1 = probe(pos.zobrist_key);
+        if (!temp1) break;
+        
+        // Find best entry for opponent
+        const ExpEntryEx* temp2 = temp1->next;
+        while (temp2) {
+          if (temp2->compare(temp1) > 0)
+            temp1 = temp2;
+          temp2 = temp2->next;
+        }
+        
+        if (lastExp[me]) {
+          sum[me] += static_cast<int64_t>(temp1->value - lastExp[me]->value);
+          ++weight[me];
+        }
+      }
+      
+      int64_t s = sum[us];
+      int64_t w = weight[us];
+      
+      if (weight[them] > 0) {
+        s -= sum[them];
+        w += weight[them];
+      }
+      
+      if (w > 0) {
+        q += static_cast<int>(s * evalImportance / w);
+      }
+    }
+    
+    return {q / QualityEvalImportanceMax, maybeDraw};
   }
 
   ExpEntryEx* find(uint16_t m) const {
