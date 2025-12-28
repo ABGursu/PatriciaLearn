@@ -518,22 +518,19 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   // Crystal: gameCycle detection in qsearch (ONLY when Fortress Detection is enabled)
   bool gameCycle = false;
   
-  if (fortressDetectionEnabled && upcoming_repetition(position, thread_info)) {
-    int drawValue = get_draw_value_armageddon(ply, false);
-    if (drawValue >= beta)
-      return drawValue;
-    
-    gameCycle = true;
-    alpha = std::max(alpha, drawValue);
+  if (fortressDetectionEnabled) {
+    if (upcoming_repetition(position, thread_info)) {
+      int drawValue = get_draw_value_armageddon(ply, false);
+      if (drawValue >= beta)
+        return drawValue;
+      
+      gameCycle = true;
+      alpha = std::max(alpha, drawValue);
+    }
   }
   
-  // Draw detection with Armageddon penalty (perspective-aware)
-  if (is_draw(position, thread_info)) {
-    if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false);  // Perspective-aware penalty
-    }
-    return 0;  // Normal draw
-  }
+  // NOTE: Original Patricia qsearch has NO is_draw check here
+  // Draw detection is only in main search function
 
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
@@ -1061,8 +1058,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
     init_picker(probcut_p, position, threshold, in_check, ss);
-    // Crystal commit af181: Simplified - just check if tt_move is capture and pseudo-legal
-    Move p_tt_move = (tt_move != MoveNone && is_cap(position, tt_move)) ? tt_move : MoveNone;
+    // Original Patricia uses SEE check; Crystal removes it (only when Fortress Detection enabled)
+    Move p_tt_move;
+    if (fortressDetectionEnabled) {
+      // Crystal commit af181: Simplified - just check if tt_move is capture
+      p_tt_move = (tt_move != MoveNone && is_cap(position, tt_move)) ? tt_move : MoveNone;
+    } else {
+      // Original Patricia: use SEE check
+      p_tt_move = (tt_move != MoveNone && SEE(position, tt_move, threshold)) ? tt_move : MoveNone;
+    }
 
     while (Move move =
                next_move(probcut_p, position, thread_info, p_tt_move, true)) {
@@ -1242,9 +1246,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // If that beats alpha, we search at normal depth with null window
     // If that also beats alpha, we search at normal depth with full window.
     
-    // Skip LMR when gameCycle is detected (only when Fortress Detection enabled)
-    bool skipLMRForGameCycle = fortressDetectionEnabled && gameCycle;
-    bool allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle && (!is_pv || ply > 1);
+    // Original Patricia LMR condition: depth >= LMRMinDepth && moves_played > is_pv
+    // Crystal adds: skip when gameCycle, extra (!is_pv || ply > 1) condition
+    bool allowLMR;
+    if (fortressDetectionEnabled) {
+      bool skipLMRForGameCycle = gameCycle;
+      allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle && (!is_pv || ply > 1);
+    } else {
+      // Original Patricia: just depth check
+      allowLMR = depth >= LMRMinDepth;
+    }
 
     if (allowLMR && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];

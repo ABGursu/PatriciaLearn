@@ -21,6 +21,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+#include <stdint.h>
+#include <stdbool.h>
+
 #define TB_PAWN 1
 #define TB_KNIGHT 2
 #define TB_BISHOP 3
