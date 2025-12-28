@@ -220,7 +220,9 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Experience Book Width type spin default 1 min 1 max 20\n"
              "option name Experience Book Eval Importance type spin default 5 min 0 max 10\n"
              "option name Experience Book Min Depth type spin default 27 min 4 max 64\n"
-             "option name Experience Book Max Moves type spin default 16 min 1 max 100\n");
+             "option name Experience Book Max Moves type spin default 16 min 1 max 100\n"
+             "option name Fortress Detection type check default false\n"
+             "option name Armageddon type check default false\n");
 
       /*for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
@@ -344,6 +346,27 @@ void uci(ThreadInfo &thread_info, Position &position) {
         input_stream >> value;
         Learning::set_experience_book_max_moves(value);
         printf("info string Experience Book Max Moves = %d\n", Learning::get_experience_book_max_moves());
+        continue;
+      }
+
+      // ========================================================================
+      // FORTRESS DETECTION & ARMAGEDDON MODE (Crystal port)
+      // ========================================================================
+      else if (name == "Fortress Detection") {
+        std::string value;
+        input_stream >> value;
+        bool enabled = (value == "true");
+        set_fortress_detection(enabled);
+        printf("info string Fortress Detection is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Armageddon") {
+        std::string value;
+        input_stream >> value;
+        bool enabled = (value == "true");
+        set_armageddon_mode(enabled);
+        printf("info string Armageddon mode is now: %s\n", enabled ? "enabled" : "disabled");
         continue;
       }
 

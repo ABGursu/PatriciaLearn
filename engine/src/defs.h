@@ -142,6 +142,7 @@ struct GameHistory { // keeps the state of the board at a particular point in
   bool is_cap;
   int16_t m_diff;
   int32_t static_eval;
+  int16_t quietMoveStreak = 0; // Crystal: track consecutive quiet moves (reset only on capture)
 };
 
 // TT stuff

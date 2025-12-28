@@ -10,8 +10,109 @@
 #include <cassert>
 #include <random>
 
-
 constexpr int NormalizationFactor = 195;
+
+// ============================================================================
+// FORTRESS DETECTION & ARMAGEDDON MODE (Crystal/HypnoS port)
+// ============================================================================
+
+// Global UCI option variables
+inline bool fortressDetectionEnabled = false;  // UCI: Fortress Detection
+inline bool armageddonMode = false;            // UCI: Armageddon
+
+// Setters for UCI options
+inline void set_fortress_detection(bool enabled) { fortressDetectionEnabled = enabled; }
+inline void set_armageddon_mode(bool enabled) { armageddonMode = enabled; }
+
+// Getters for UCI options
+inline bool get_fortress_detection() { return fortressDetectionEnabled; }
+inline bool get_armageddon_mode() { return armageddonMode; }
+
+// Armageddon draw penalty constant
+constexpr int ArmageddonPenalty = ScoreMate / 2;
+
+// Draw value with Armageddon penalty (perspective-aware)
+// In Armageddon mode, draws are bad for US (root side), good for opponent
+// At even ply (our turn): return negative (bad for us)
+// At odd ply (opponent's turn): return positive (good for them, which negates to bad for us at parent)
+// tb_draw: if true, no penalty applied (TB draws are exempt)
+inline int get_draw_value_armageddon(int ply, bool tb_draw = false) {
+  if (armageddonMode && !tb_draw) {
+    // Even ply = our turn (root side), odd ply = opponent's turn
+    return (ply % 2 == 0) ? -ArmageddonPenalty : ArmageddonPenalty;
+  }
+  return 0;  // Normal draw value
+}
+
+// ============================================================================
+// UPCOMING REPETITION DETECTION (Crystal port - simplified for Patricia)
+// ============================================================================
+// Tests if there's an upcoming move that draws by repetition
+// This is a simplified version without Cuckoo hashing
+inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_info) {
+  int halfmoves = position.halfmoves;
+  int game_ply = thread_info.game_ply;
+  
+  if (halfmoves < 3)
+    return false;
+    
+  uint64_t current_key = position.zobrist_key;
+  
+  // Check if any position 2, 4, 6... moves ago matches
+  // This indicates we could repeat with a reversing move
+  int start_index = game_ply - 2;
+  int end_index = std::max(game_ply - halfmoves, 0);
+  
+  for (int i = start_index; i >= end_index; i -= 2) {
+    if (current_key == thread_info.game_hist[i].position_key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// KING DANGER DETECTION (Crystal port - Fortress Detection helper)
+// ============================================================================
+// Checks if the king is in a dangerous position (few legal squares, many attackers)
+// This helps detect "fortress" positions where draws are likely
+inline bool king_danger(const Position &position, int color) {
+  if (!fortressDetectionEnabled)
+    return false;
+    
+  int ksq = get_king_pos(position, color);
+  uint64_t occ = position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
+  uint64_t own_pieces = position.colors_bb[color];
+  int enemy = color ^ 1;
+  
+  // Get king ring (squares around the king)
+  uint64_t king_ring = KingAttacks[ksq];
+  
+  int king_attackers_count = 0;
+  int legal_king_count = 0;
+  
+  while (king_ring) {
+    int to = pop_lsb(king_ring);
+    
+    // Check if this square is attacked by enemy
+    bool enemy_attacks = attacks_square(position, to, enemy);
+    
+    if (!enemy_attacks) {
+      // Check if the square is free (not occupied by own piece)
+      if (!(own_pieces & (1ULL << to))) {
+        legal_king_count++;
+      }
+    } else {
+      king_attackers_count++;
+    }
+  }
+  
+  // King is in danger if:
+  // - Multiple attackers and few legal squares
+  // - Or any attacker and no legal squares
+  return (king_attackers_count > 1 && legal_king_count < 2) ||
+         (king_attackers_count > 0 && legal_king_count == 0);
+}
 
 void update_history(int16_t &entry, int score) { // Update history score
   entry += score - entry * abs(score) / 16384;
@@ -413,6 +514,26 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   thread_info.nodes++;
 
   int ply = thread_info.search_ply;
+  
+  // Crystal: gameCycle detection in qsearch (ONLY when Fortress Detection is enabled)
+  bool gameCycle = false;
+  
+  if (fortressDetectionEnabled && upcoming_repetition(position, thread_info)) {
+    int drawValue = get_draw_value_armageddon(ply, false);
+    if (drawValue >= beta)
+      return drawValue;
+    
+    gameCycle = true;
+    alpha = std::max(alpha, drawValue);
+  }
+  
+  // Draw detection with Armageddon penalty (perspective-aware)
+  if (is_draw(position, thread_info)) {
+    if (armageddonMode) {
+      return get_draw_value_armageddon(ply, false);  // Perspective-aware penalty
+    }
+    return 0;  // Normal draw
+  }
 
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
@@ -440,7 +561,8 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
     tt_move = entry.best_move;
   }
 
-  if (tt_score != ScoreNone) {
+  // Skip TT cutoff if gameCycle (only when Fortress Detection enabled)
+  if (tt_score != ScoreNone && !(fortressDetectionEnabled && gameCycle)) {
     if ((entry_type == EntryTypes::Exact) ||
         (entry_type == EntryTypes::LBound && tt_score >= beta) ||
         (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
@@ -562,6 +684,19 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   int ply = thread_info.search_ply, pv_index = ply * MaxSearchDepth;
+  bool root = !ply;
+  int color = position.color;
+
+  // ============================================================================
+  // GAME CYCLE DETECTION (Crystal port - ONLY when Fortress Detection enabled)
+  // ============================================================================
+  bool gameCycle = false;
+  bool kingDanger = false;
+  
+  // Check for king danger (Fortress Detection)
+  if (fortressDetectionEnabled && !root) {
+    kingDanger = king_danger(position, color);
+  }
 
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
@@ -572,9 +707,30 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
-  if (ply && is_draw(position, thread_info)) { // Draw detection
-    int draw_score = 1 - (thread_info.nodes & 3);
+  // ============================================================================
+  // UPCOMING REPETITION CHECK (Crystal gameCycle - ONLY when Fortress Detection enabled)
+  // ============================================================================
+  if (fortressDetectionEnabled && !root && upcoming_repetition(position, thread_info)) {
+    int drawValue = get_draw_value_armageddon(ply, false);
+    if (drawValue >= beta)
+      return drawValue;
+    
+    gameCycle = true;
+    alpha = std::max(alpha, drawValue);
+  }
 
+  // Standard draw detection (50-move, material, repetition)
+  if (ply && is_draw(position, thread_info)) {
+    // Armageddon mode: heavy penalty for draws (perspective-aware)
+    // At even ply (our turn): draw is bad for us (-ArmageddonPenalty)
+    // At odd ply (opponent's turn): draw is good for them (+ArmageddonPenalty)
+    // This ensures draws always propagate as bad for root side
+    if (armageddonMode) {
+      return get_draw_value_armageddon(ply, false);
+    }
+    
+    // Normal draw score with small randomization
+    int draw_score = 1 - (thread_info.nodes & 3);
     int material = material_eval(position);
 
     if (material < 0) {
@@ -584,14 +740,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
 
     return draw_score;
-    // We want to discourage draws at the root.
-    // ply 0 - make a move that makes the position a draw
-    // ply 1 - bonus to side, which is penalty to us
-
-    // alternatively
-    // ply 0 - we make forced move
-    // ply 1 - opponent makes draw move
-    // ply 2 - penalty to us*/
   }
 
   if (depth <= 0) {
@@ -600,7 +748,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
   thread_info.nodes++;
 
-  bool root = !ply, color = position.color, raised_alpha = false;
+  bool raised_alpha = false;
 
   Move best_move = MoveNone;
   Move excluded_move = thread_info.excluded_move;
@@ -650,7 +798,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     tt_depth = entry.depth;
   }
 
-  if (tt_score != ScoreNone && !is_pv && tt_depth >= depth) {
+  // Skip TT cutoff if gameCycle is detected (only when Fortress Detection enabled)
+  if (tt_score != ScoreNone && !is_pv && !(fortressDetectionEnabled && gameCycle) && tt_depth >= depth) {
     // If we get a useful score from the TT and it's
     // searched to at least the same depth we would
     // have searched, then we can return
@@ -846,7 +995,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   if (!is_pv && !in_check && !singular_search) {
 
-    if (alpha < 2000 && depth < 5 && static_eval + 400 * depth < alpha) {
+    // Skip pruning if gameCycle is detected (only when Fortress Detection enabled)
+    bool skipForGameCycle = fortressDetectionEnabled && gameCycle;
+    
+    if (!skipForGameCycle && alpha < 2000 && depth < 5 && static_eval + 400 * depth < alpha) {
       score = qsearch(alpha, beta, position, thread_info, TT);
       if (score <= alpha) {
         return score;
@@ -855,17 +1007,21 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     // Reverse Futility Pruning (RFP): If our position is way better than beta,
     // we're likely good to stop searching the node.
+    // Skip if gameCycle or kingDanger (only when Fortress Detection enabled)
 
-    if (depth <= RFPMaxDepth &&
+    if (!skipForGameCycle && !kingDanger && depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
-    if (static_eval >= beta && depth >= NMPMinDepth &&
+    
+    // Null Move Pruning (NMP): If we can give our opponent a free move and
+    // still beat beta on a reduced search, we can prune the node.
+    // Skip if gameCycle (only when Fortress Detection enabled)
+    
+    if (!skipForGameCycle && static_eval >= beta && depth >= NMPMinDepth &&
         has_non_pawn_material(position, color) &&
-        (ss - 1)->played_move != MoveNone) {
-
-      // Null Move Pruning (NMP): If we can give our opponent a free move and
-      // still beat beta on a reduced search, we can prune the node.
+        (ss - 1)->played_move != MoveNone &&
+        !kingDanger) {
 
       Position temp_pos = position;
       make_move(temp_pos, MoveNone);
@@ -889,22 +1045,24 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth) {
-    // Internal Iterative Reduction: If we are in a PV node and have no TT move,
-    // reduce the depth.
+  // Internal Iterative Reduction: If we are in a PV node and have no TT move,
+  // reduce the depth.
+  // Skip if gameCycle (only when Fortress Detection enabled)
+  bool skipForGameCycleIIR = fortressDetectionEnabled && gameCycle;
+  if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth && !skipForGameCycleIIR) {
     depth--;
   }
 
+  // ProbCut: Skip if gameCycle (only when Fortress Detection enabled)
   int p_beta = beta + ProbcutMargin;
-  if (!in_check && depth >= 5 && abs(beta) < ScoreWin &&
+  if (!in_check && !skipForGameCycleIIR && depth >= 5 && abs(beta) < ScoreWin &&
       (!tt_hit || tt_depth + 4 <= depth || tt_score >= p_beta)) {
 
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
     init_picker(probcut_p, position, threshold, in_check, ss);
-    Move p_tt_move =
-        (tt_move != MoveNone && SEE(position, tt_move, threshold) ? tt_move
-                                                                  : MoveNone);
+    // Crystal commit af181: Simplified - just check if tt_move is capture and pseudo-legal
+    Move p_tt_move = (tt_move != MoveNone && is_cap(position, tt_move)) ? tt_move : MoveNone;
 
     while (Move move =
                next_move(probcut_p, position, thread_info, p_tt_move, true)) {
@@ -979,6 +1137,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                                  [extract_to(move)];
 
     is_capture = is_cap(position, move);
+    
+    // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when Fortress Detection enabled)
+    if (fortressDetectionEnabled) {
+      ss->quietMoveStreak = is_capture ? 0 : (ss - 1)->quietMoveStreak + 1;
+    }
+    
     if (!is_capture && !is_pv && best_score > ScoreLost) {
 
       int lmr_depth = std::max(1, depth - LMRTable[depth][moves_played]);
@@ -1017,11 +1181,21 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
 
     int extension = 0;
+    
+    // Crystal: gameCycleExtension - extend when in game cycle to find escape (ONLY when Fortress Detection enabled)
+    if (fortressDetectionEnabled && gameCycle) {
+      int drawValue = get_draw_value_armageddon(ply, false);
+      bool gameCycleExtension = is_pv || (ply > 2 && drawValue < 0);
+      if (gameCycleExtension) {
+        extension = 2;
+      }
+    }
 
     // Singular Extensions (SE): If a search finds that the TT move is way
     // better than all other moves, extend it under certain conditions.
+    // Skip singular extension if gameCycle (only when Fortress Detection enabled)
 
-    if (!root && ply < thread_info.current_iter * 2) {
+    if (!root && ply < thread_info.current_iter * 2 && !(fortressDetectionEnabled && gameCycle)) {
       if (!singular_search && depth >= SEDepth && move == tt_move &&
           abs(tt_score) < ScoreWin && tt_depth >= depth - 3 &&
           entry_type != EntryTypes::UBound) {
@@ -1067,8 +1241,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // making this technique more than worth it.
     // If that beats alpha, we search at normal depth with null window
     // If that also beats alpha, we search at normal depth with full window.
+    
+    // Skip LMR when gameCycle is detected (only when Fortress Detection enabled)
+    bool skipLMRForGameCycle = fortressDetectionEnabled && gameCycle;
+    bool allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle && (!is_pv || ply > 1);
 
-    if (depth >= LMRMinDepth && moves_played > is_pv) {
+    if (allowLMR && moves_played > is_pv) {
       int R = LMRTable[depth][moves_played];
       if (is_capture) {
         // Captures get LMRd less because they're the most likely moves to beat
@@ -1093,11 +1271,20 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       R += (thread_info.FailHighCount[ply + 1] > 4);
 
-      // Clamp reduction so we don't immediately go into qsearch
       R = std::clamp(R, 0, newdepth - 1);
+      
+      // LMR depth formula: Crystal uses updated formula only when Fortress Detection enabled
+      int lmr_depth;
+      if (fortressDetectionEnabled) {
+        // Crystal commit 678d5: Updated LMR depth formula
+        lmr_depth = std::max(1, std::min(newdepth - R, newdepth + 2)) + is_pv;
+      } else {
+        // Original Patricia LMR depth
+        lmr_depth = newdepth - R;
+      }
 
       // Reduced search, reduced window
-      score = -search<false>(-alpha - 1, -alpha, newdepth - R, true,
+      score = -search<false>(-alpha - 1, -alpha, lmr_depth, true,
                              moved_position, thread_info, TT);
       if (score > alpha) {
         full_search = R > 0;
