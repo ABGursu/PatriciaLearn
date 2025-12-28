@@ -17,6 +17,27 @@ namespace Learning {
 // Minimum depth to store experience entries
 constexpr uint8_t MinDepth = 4;
 
+// Experience Book options (from HypnoS)
+extern bool experienceBookEnabled;
+extern int experienceBookWidth;
+extern int experienceBookEvalImportance;
+extern int experienceBookMinDepth;
+extern int experienceBookMaxMoves;
+
+// Experience Book option setters
+void set_experience_book_enabled(bool enabled);
+void set_experience_book_width(int width);
+void set_experience_book_eval_importance(int importance);
+void set_experience_book_min_depth(int depth);
+void set_experience_book_max_moves(int moves);
+
+// Experience Book option getters
+bool get_experience_book_enabled();
+int get_experience_book_width();
+int get_experience_book_eval_importance();
+int get_experience_book_min_depth();
+int get_experience_book_max_moves();
+
 // Experience entry structure (V2 format)
 // Format matches HypnoS exactly: 8+4+4+4+2+2 = 24 bytes
 struct ExpEntry {
@@ -88,6 +109,21 @@ struct ExpEntryEx : ExpEntry {
                       uint16_t c = 1)
       : ExpEntry(k, m, v, d, c), next(nullptr) {}
 
+  // Simple quality calculation for Experience Book
+  // Returns quality score based on count, depth, and value
+  int quality(int evalImportance = 5) const {
+    constexpr int QualityEvalImportanceMax = 10;
+    int q = static_cast<int>(count) * (QualityEvalImportanceMax - evalImportance);
+    
+    // Add value contribution based on evalImportance
+    if (evalImportance > 0 && depth > 0) {
+      // Positive value = good for us, scale by depth importance
+      q += (value * evalImportance) / (QualityEvalImportanceMax * 10);
+    }
+    
+    return q / QualityEvalImportanceMax;
+  }
+
   ExpEntryEx* find(uint16_t m) const {
     auto* exp = const_cast<ExpEntryEx*>(this);
     do {
@@ -112,8 +148,8 @@ struct ExpEntryEx : ExpEntry {
   }
 };
 
-// Experience file signature (PatriciaLearn's own signature, but file format is compatible with HypnoS)
-constexpr const char* ExperienceSignature = "Patricia Experience version 2";
+// Experience file signature (same as HypnoS for full compatibility)
+constexpr const char* ExperienceSignature = "SugaR Experience version 2";
 constexpr int ExperienceVersion = 2;
 
 // Global functions
@@ -121,6 +157,11 @@ void init();
 bool enabled();
 void unload();
 void save();
+
+// UCI option setters
+void set_experience_enabled(bool enabled);
+void set_experience_file(const std::string& filename);
+void set_experience_readonly(bool readonly);
 
 void wait_for_loading_finished();
 
@@ -141,5 +182,10 @@ extern std::atomic<bool> g_benchMode;
 extern std::atomic<bool> g_benchSingleShot;
 
 void touch();
+
+// Utility commands (defrag, merge, show_exp)
+void defrag(const std::string& filename);
+void merge(const std::vector<std::string>& filenames);
+void show_exp(uint64_t key, bool extended = false);
 
 } // namespace Learning

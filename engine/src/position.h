@@ -8,7 +8,7 @@
 int movegen(const Position &position, std::span<Move> move_list,
   uint64_t checkers, int gen_type);
 
-int16_t total_mat(const Position &position) {
+inline int16_t total_mat(const Position &position) {
   int m = (position.material_count[0] + position.material_count[1]) * 100 +
           (position.material_count[2] + position.material_count[3]) * 300 +
           (position.material_count[4] + position.material_count[5]) * 300 +
@@ -18,7 +18,7 @@ int16_t total_mat(const Position &position) {
   return m;
 }
 
-std::string
+inline std::string
 internal_to_uci(const Position &position,
                 Move move) { // Converts an internal move into a uci move.
 
@@ -47,12 +47,12 @@ internal_to_uci(const Position &position,
   return uci;
 }
 
-int get_king_pos(const Position &position, int color) {
+inline int get_king_pos(const Position &position, int color) {
   return get_lsb(position.colors_bb[color] &
                  position.pieces_bb[PieceTypes::King]);
 }
 
-void print_board(
+inline void print_board(
     Position position) { // Prints the board. Very helpful for debugging.
   for (int i = 56; i >= 0;) {
     printf("+---+---+---+---+---+---+---+---+\n");
@@ -411,7 +411,7 @@ attacks_square(const Position &position, int sq,
   return attackers & position.colors_bb[color];
 }
 
-uint64_t
+inline uint64_t
 attacks_square(const Position &position, int sq, int color,
                uint64_t occ) { // Do we attack the square at position "sq"?
 
@@ -431,7 +431,7 @@ attacks_square(const Position &position, int sq, int color,
 }
 
 // Does anyone attack the square
-uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
+inline uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
 
   uint64_t bishops = position.pieces_bb[PieceTypes::Bishop] |
                      position.pieces_bb[PieceTypes::Queen];
@@ -448,7 +448,7 @@ uint64_t attacks_square(const Position &position, int sq, uint64_t occ) {
          (KingAttacks[sq] & position.pieces_bb[PieceTypes::King]);
 }
 
-uint64_t
+inline uint64_t
 br_attacks_square(const Position &position, int sq, int color,
                   uint64_t occ) { // Do we attack the square at position "sq"?
 
@@ -463,9 +463,9 @@ br_attacks_square(const Position &position, int sq, int color,
   return attackers & position.colors_bb[color] & occ;
 }
 
-bool is_queen_promo(Move move) { return extract_promo(move) == 3; }
+inline bool is_queen_promo(Move move) { return extract_promo(move) == 3; }
 
-bool is_cap(const Position &position, Move &move) {
+inline bool is_cap(const Position &position, const Move &move) {
   if (extract_type(move) == MoveTypes::Castling) {
     return false;
   }
@@ -476,7 +476,7 @@ bool is_cap(const Position &position, Move &move) {
           is_queen_promo((move)));
 }
 
-void update_nnue_state(ThreadInfo &thread_info, Move move,
+inline void update_nnue_state(ThreadInfo &thread_info, Move move,
                        const Position &position, const Position &moved_position) { // Updates the nnue state
 
   int from = extract_from(move), to = extract_to(move);
@@ -544,7 +544,7 @@ void update_nnue_state(ThreadInfo &thread_info, Move move,
   }
 }
 
-void make_move(Position &position, Move move) { // Perform a move on the board.
+inline void make_move(Position &position, Move move) { // Perform a move on the board.
 
   position.halfmoves++;
 
@@ -749,7 +749,7 @@ void make_move(Position &position, Move move) { // Perform a move on the board.
   __builtin_prefetch(&TT[hash_to_idx(temp_hash)]);
 }
 
-bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
+inline bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   if (move == MoveNone) {
     return false;
   }
@@ -846,7 +846,7 @@ bool is_pseudo_legal(const Position &position, Move move, uint64_t checkers) {
   return (attacks & (1ull << to));
 }
 
-bool is_legal(const Position &position,
+inline bool is_legal(const Position &position,
               Move move) { // Perform a move on the board.
   uint64_t occupied =
       position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];

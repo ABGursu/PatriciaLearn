@@ -7,6 +7,8 @@
 #include "position.h"
 #include "tm.h"
 #include "utils.h"
+#include <cassert>
+#include <random>
 
 
 constexpr int NormalizationFactor = 195;
@@ -226,7 +228,7 @@ void ss_pop(ThreadInfo &thread_info) {
   thread_info.nnue_state.pop();
 }
 
-bool material_draw(
+inline bool material_draw(
     const Position &position) { // Is there not enough material on the
                                 // position for one side to win?
   for (int i : {0, 1, 6, 7, 8,
@@ -250,7 +252,7 @@ bool material_draw(
   return true;
 }
 
-bool is_draw(const Position &position,
+inline bool is_draw(const Position &position,
              ThreadInfo &thread_info) { // Detects if the position is a draw.
 
   uint64_t hash = position.zobrist_key;
@@ -284,7 +286,120 @@ bool is_draw(const Position &position,
   return false;
 }
 
-int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
+// ExpEntryEx::quality - Calculate quality of an experience entry
+// Returns pair: (quality_score, maybe_draw)
+// Port from HypnoS, adapted for Patricia's structures
+inline std::pair<int, bool> exp_quality(const Learning::ExpEntryEx* entry,
+                                        Position& pos, ThreadInfo& thread_info,
+                                        int evalImportance) {
+  static constexpr int QualityEvalImportanceMax = 10;
+  static constexpr int QualityExperienceMovesAhead = 10;
+  static constexpr int COLOR_NB = 2;
+
+  assert(evalImportance >= 0 && evalImportance <= QualityEvalImportanceMax);
+
+  // Draw detection
+  bool maybeDraw = false;
+
+  // Quality based on move count
+  int q = entry->count * (QualityEvalImportanceMax - evalImportance);
+
+  // Quality based on difference in evaluation
+  if (evalImportance) {
+    const uint8_t us = pos.color;
+    const uint8_t them = us ^ 1;
+
+    // Calculate quality based on evaluation improvement of next moves
+    std::vector<Move> moves;  // Used for doing/undoing of experience moves
+
+    std::array<int64_t, COLOR_NB> sum{};
+    std::array<int64_t, COLOR_NB> weight{};
+
+    // Start our sum/weight with something positive!
+    sum[us] = entry->count;
+    weight[us] = 1;
+
+    // Save original position and thread_info for restoration
+    Position originalPos = pos;
+    ThreadInfo originalThreadInfo = thread_info;
+
+    // Look ahead
+    uint8_t me = us;
+    const Learning::ExpEntryEx* lastExp[COLOR_NB] = {nullptr, nullptr};
+    const Learning::ExpEntryEx* temp1 = entry;
+
+    while (true) {
+      // To be used later
+      lastExp[me] = temp1;
+
+      // Do the move
+      Move moveToPlay = static_cast<Move>(temp1->move);
+      moves.push_back(moveToPlay);
+      make_move(pos, moveToPlay);
+      thread_info.game_ply++;
+      me = me ^ 1;
+
+      if (!maybeDraw) {
+        maybeDraw = is_draw(pos, thread_info);
+      }
+
+      if (moves.size() >= QualityExperienceMovesAhead) {
+        break;
+      }
+
+      // Probe the new position
+      temp1 = Learning::probe(pos.zobrist_key);
+
+      if (!temp1) {
+        break;
+      }
+
+      // Find best next experience move (shallow search)
+      const Learning::ExpEntryEx* temp2 = temp1->next;
+
+      while (temp2) {
+        if (temp2->compare(temp1) > 0) {
+          temp1 = temp2;
+        }
+        temp2 = temp2->next;
+      }
+
+      if (lastExp[me]) {
+        sum[me] += static_cast<int64_t>(temp1->value - lastExp[me]->value);
+        ++weight[me];
+      }
+    }
+
+    // Restore position and thread_info by undoing all moves
+    pos = originalPos;
+    thread_info = originalThreadInfo;
+
+    // Calculate quality
+    int64_t s = sum[us];
+    int64_t w = weight[us];
+
+    if (weight[them]) {
+      s -= sum[them];
+      w += weight[them];
+    }
+
+    if (w > 0) {
+      q += static_cast<int>(s * evalImportance / w);
+    }
+  } else {
+    // Shallow draw detection when 'evalImportance' is zero!
+    Position tempPos = pos;
+    ThreadInfo tempThreadInfo = thread_info;
+    Move moveToPlay = static_cast<Move>(entry->move);
+    make_move(tempPos, moveToPlay);
+    tempThreadInfo.game_ply++;
+    maybeDraw = is_draw(tempPos, tempThreadInfo);
+  }
+
+  return {q / QualityEvalImportanceMax, maybeDraw};
+}
+
+inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_info,
             std::vector<TTBucket> &TT) { // Performs a quiescence search on the
                                          // given position.
   if (out_of_time(thread_info)) {
@@ -558,14 +673,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   int expCount = 0;
 
   while (tempExp) {
-    if (tempExp->depth >= static_cast<uint8_t>(depth)) {
+    if (tempExp->depth >= depth) {
       ++expCount;
 
       // Better than current TT entry?
       if (!bestExp && (!tt_hit || tempExp->depth > tt_depth)) {
         bestExp = tempExp;
         tt_hit = true;
-        tt_move = tempExp->move;
+        tt_move = static_cast<Move>(tempExp->move);
         tt_score = tempExp->value;
         tt_depth = tempExp->depth;
         entry_type = (tt_score >= beta ? EntryTypes::LBound : EntryTypes::Exact);
@@ -579,20 +694,21 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       // Update history for experience moves (bonus for good moves, malus for bad)
       if (!is_pv) {
         const int32_t expValue = tempExp->value;
+        const Move expMove = static_cast<Move>(tempExp->move);
 
         if (expValue >= beta) {
           // Good move - give bonus
-          if (!is_cap(position, tempExp->move)) {
-            const int bonus = std::min(130 * static_cast<int>(tempExp->depth) - 71, 1043);
-            int piece = position.board[extract_from(tempExp->move)];
-            int sq = extract_to(tempExp->move);
+          if (!is_cap(position, expMove)) {
+            const int bonus = std::min(130 * tempExp->depth - 71, 1043);
+            int piece = position.board[extract_from(expMove)];
+            int sq = extract_to(expMove);
             update_history(thread_info.HistoryScores[piece][sq], bonus);
           }
-        } else if (!is_cap(position, tempExp->move)) {
+        } else if (!is_cap(position, expMove)) {
           // Bad move - give malus
-          const int penalty = -(std::min(130 * static_cast<int>(tempExp->depth) - 71, 1043));
-          int piece = position.board[extract_from(tempExp->move)];
-          int sq = extract_to(tempExp->move);
+          const int penalty = -(std::min(130 * tempExp->depth - 71, 1043));
+          int piece = position.board[extract_from(expMove)];
+          int sq = extract_to(expMove);
           update_history(thread_info.HistoryScores[piece][sq], penalty);
         }
       }
@@ -609,8 +725,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   if (!singular_search && Learning::enabled()) {
     const auto* bestExpEntry = Learning::find_best_entry(position.zobrist_key);
     if (bestExpEntry && (!tt_hit || bestExpEntry->depth > tt_depth)) {
-      const uint8_t expDepth = bestExpEntry->depth;
-      const Move expMove = bestExpEntry->move;
+      const uint8_t expDepth = static_cast<uint8_t>(bestExpEntry->depth);
+      const Move expMove = static_cast<Move>(bestExpEntry->move);
       const int32_t expValue = bestExpEntry->value;
 
       // Early cutoff with experience depth
@@ -1256,22 +1372,85 @@ void iterative_deepen(
     }
   }
 
-  // Experience Book: Probe experience at root position
+  // Experience Book: Book move selection from HypnoS
+  // If Experience Book is enabled and position is in the book, skip search
   Move expBookMove = MoveNone;
-  if (Learning::enabled() && !thread_info.doing_datagen) {
+  bool useExpBookMove = false;
+  
+  if (Learning::enabled() && !thread_info.doing_datagen &&
+      Learning::get_experience_book_enabled() &&
+      thread_info.game_ply / 2 < Learning::get_experience_book_max_moves()) {
+    
+    const int expBookMinDepth = Learning::get_experience_book_min_depth();
+    const int expBookWidth = Learning::get_experience_book_width();
+    const int evalImportance = Learning::get_experience_book_eval_importance();
+    
     const auto* exp = Learning::probe(position.zobrist_key);
+    
     if (exp) {
-      // Find best experience entry
-      const auto* bestExp = Learning::find_best_entry(position.zobrist_key);
-      if (bestExp && bestExp->depth >= Learning::MinDepth) {
-        expBookMove = bestExp->move;
-        // Check if move is legal and move it to front of root moves
+      // Collect all entries that meet min depth requirement with their quality
+      std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
+      const auto* temp = exp;
+      
+      while (temp) {
+        if (temp->depth >= static_cast<int32_t>(expBookMinDepth)) {
+          int q = temp->quality(evalImportance);
+          if (q > 0) {
+            qualityList.emplace_back(temp, q);
+          }
+        }
+        temp = temp->next;
+      }
+      
+      if (!qualityList.empty()) {
+        // Sort by quality (highest first)
+        std::sort(qualityList.begin(), qualityList.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        // Select move based on width
+        if (expBookWidth > 1 && qualityList.size() > 1) {
+          // Random selection from top 'width' moves
+          static std::mt19937 rng(static_cast<unsigned>(
+              std::chrono::steady_clock::now().time_since_epoch().count()));
+          int maxIndex = std::min<int>(expBookWidth, static_cast<int>(qualityList.size()));
+          std::uniform_int_distribution<int> dist(0, maxIndex - 1);
+          expBookMove = static_cast<Move>(qualityList[dist(rng)].first->move);
+        } else {
+          // Best move only
+          expBookMove = static_cast<Move>(qualityList.front().first->move);
+        }
+        
+        // Verify move is in root moves (legal)
         for (size_t i = 0; i < thread_info.root_moves.size(); i++) {
           if (thread_info.root_moves[i].move == expBookMove) {
+            useExpBookMove = true;
             // Move to front
             std::swap(thread_info.root_moves[0], thread_info.root_moves[i]);
             break;
           }
+        }
+      }
+    }
+  }
+  
+  // If we have an Experience Book move, output it and skip search
+  if (useExpBookMove && thread_info.thread_id == 0) {
+    printf("info depth 1 seldepth 1 score cp 0 nodes 0 nps 0 time 0 pv %s\n",
+           internal_to_uci(position, expBookMove).c_str());
+    printf("bestmove %s\n", internal_to_uci(position, expBookMove).c_str());
+    return;
+  }
+  
+  // If experience enabled but not book mode, still use experience for move ordering
+  if (Learning::enabled() && !thread_info.doing_datagen && !useExpBookMove) {
+    const auto* bestExp = Learning::find_best_entry(position.zobrist_key);
+    if (bestExp && bestExp->depth >= static_cast<int32_t>(Learning::MinDepth)) {
+      Move expMove = static_cast<Move>(bestExp->move);
+      // Move to front of root moves for better ordering
+      for (size_t i = 0; i < thread_info.root_moves.size(); i++) {
+        if (thread_info.root_moves[i].move == expMove) {
+          std::swap(thread_info.root_moves[0], thread_info.root_moves[i]);
+          break;
         }
       }
     }

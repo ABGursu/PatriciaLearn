@@ -1,10 +1,13 @@
-.PHONY: build datagen aarch64 cross-aarch64 cross-aarch64-clang
+.PHONY: build datagen aarch64 cross-aarch64 cross-aarch64-clang mingw msvc clang
 
 EXE := patricia
-SOURCES := src/patricia.cpp src/fathom/src/tbprobe.c
+SOURCES := src/patricia.cpp src/learning.cpp src/fathom/src/tbprobe.c
+
+# Include path for source files (relative to engine directory)
+INCLUDES := -Isrc
 
 CXX := clang++
-CXXFLAGS := -O3 -march=native -std=c++20 -ffast-math
+CXXFLAGS := -O3 -march=native -std=c++20 -ffast-math $(INCLUDES)
 LINKER :=
 
 ifeq ($(OS), Windows_NT)
@@ -20,7 +23,10 @@ endif
 OUT := $(EXE)$(SUFFIX)
 
 # --- Native build ----------------------------------------------------------
+# Note: Run 'make' from the engine directory
 build: $(SOURCES)
+	@echo Building from: $(shell pwd)
+	@echo Sources: $(SOURCES)
 	$(CXX) $^ $(CXXFLAGS) -o $(OUT) $(LINKER)
 
 default: build
@@ -49,4 +55,38 @@ cross-aarch64-clang: CXX := clang++
 cross-aarch64-clang: CXXFLAGS := --target=aarch64-linux-gnu -O3 -std=c++20 -ffast-math -march=armv8-a -pthread -static
 cross-aarch64-clang: OUT := $(EXE)_aarch64$(SUFFIX)
 cross-aarch64-clang: $(SOURCES)
+	$(CXX) $(CXXFLAGS) $^ -o $(OUT)
+
+# --- MinGW build (Windows) -------------------------------------------------
+# Note: Run 'make mingw' from the engine directory
+mingw: CXX := g++
+mingw: CXXFLAGS := -O3 -std=c++20 -ffast-math -march=native $(INCLUDES)
+mingw: SUFFIX := .exe
+mingw: OUT := $(EXE)$(SUFFIX)
+mingw: $(SOURCES)
+	@echo Building from: $(shell pwd)
+	@echo Sources: $(SOURCES)
+	$(CXX) $(CXXFLAGS) $^ -o $(OUT) -static
+
+# --- MSVC build (Windows) --------------------------------------------------
+# Note: Run 'make msvc' from the engine directory
+# Requires Visual Studio Developer Command Prompt
+msvc: CXX := cl
+msvc: CXXFLAGS := /O2 /std:c++20 /EHsc /W3 /I src
+msvc: SUFFIX := .exe
+msvc: OUT := $(EXE)$(SUFFIX)
+msvc: $(SOURCES)
+	@echo Building from: $(shell pwd)
+	@echo Sources: $(SOURCES)
+	$(CXX) $(CXXFLAGS) $^ /Fe:$(OUT)
+
+# --- Clang build (Windows) -------------------------------------------------
+# Note: Run 'make clang' from the engine directory
+clang: CXX := clang++
+clang: CXXFLAGS := -O3 -std=c++20 -ffast-math -march=native $(INCLUDES)
+clang: SUFFIX := .exe
+clang: OUT := $(EXE)$(SUFFIX)
+clang: $(SOURCES)
+	@echo Building from: $(shell pwd)
+	@echo Sources: $(SOURCES)
 	$(CXX) $(CXXFLAGS) $^ -o $(OUT)

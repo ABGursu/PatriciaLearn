@@ -1,14 +1,24 @@
 #include "learning.h"
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <unordered_set>
+#include <vector>
 
 namespace Learning {
+
+// Experience Book options (default values from HypnoS)
+bool experienceBookEnabled = false;
+int experienceBookWidth = 1;
+int experienceBookEvalImportance = 5;
+int experienceBookMinDepth = 27;
+int experienceBookMaxMoves = 16;
 
 // Write buffer size
 #ifndef NDEBUG
@@ -17,8 +27,7 @@ constexpr size_t WriteBufferSize = 1024;
 constexpr size_t WriteBufferSize = 1024 * 1024 * 16; // 16MB
 #endif
 
-// Experience data storage
-namespace {
+// Experience data storage class (moved outside anonymous namespace for access)
 class ExperienceData {
 private:
   std::string _filename;
@@ -75,7 +84,7 @@ private:
     }
 
     // If existing entry and same move exists then merge
-    ExpEntryEx* exp2 = itr->second->find(exp->move);
+    ExpEntryEx* exp2 = itr->second->find(static_cast<uint16_t>(exp->move));
     if (exp2) {
       exp2->merge(exp);
       return false;
@@ -155,6 +164,9 @@ private:
 
     // Use the actual signature length found
     const size_t actualSigLen = isPatriciaSig ? sigLen : hypnoSSigLen;
+
+    // Seek to correct position after signature
+    in.seekg(static_cast<std::streamoff>(actualSigLen), std::ios::beg);
 
     // Check entry count
     const size_t entriesDataLength = inSize - actualSigLen;
@@ -257,7 +269,7 @@ private:
       }
     }
 
-    out.seekp(std::ios::end);
+    out.seekp(0, std::ios::end);
 
     std::vector<char> writeBuffer;
     writeBuffer.reserve(WriteBufferSize);
@@ -306,7 +318,7 @@ private:
         const uint16_t scale = 1 + maxCount / 128;
         exp1 = exp;
         while (exp1) {
-          exp1->count = std::max(exp1->count / scale, static_cast<uint16_t>(1));
+          exp1->count = std::max(static_cast<uint16_t>(exp1->count / scale), static_cast<uint16_t>(1));
           exp1 = exp1->next;
         }
 
@@ -494,12 +506,12 @@ public:
   }
 };
 
+// Global experience state
 ExperienceData* currentExperience = nullptr;
 bool experienceEnabled = true;
+bool experienceReadonly = false;
 bool learningPaused = false;
-std::string experienceFilename;
-
-} // namespace
+std::string experienceFilename = "patricia.exp";
 
 // Global experience functions
 std::atomic<bool> g_benchMode{false};
@@ -528,17 +540,14 @@ void touch() {
 }
 
 void init() {
-  // For now, experience is always enabled
-  // In the future, this can be controlled by UCI options
-  experienceEnabled = true;
-
   if (!experienceEnabled) {
     unload();
     return;
   }
 
-  // Default filename - can be set via UCI option later
-  experienceFilename = "patricia.exp";
+  if (experienceFilename.empty()) {
+    experienceFilename = "patricia.exp";
+  }
 
   if (currentExperience) {
     if (currentExperience->filename() == experienceFilename &&
@@ -563,8 +572,9 @@ void unload() {
 void save() {
   if (!currentExperience || !currentExperience->has_new_exp())
     return;
-  // Note: Options["Experience Readonly"] check would go here if UCI options are implemented
-  // For now, we always allow saving (can be added later when UCI options are integrated)
+  
+  if (experienceReadonly)
+    return;
 
   currentExperience->save(currentExperience->filename(), false, false);
 }
@@ -589,6 +599,23 @@ const ExpEntryEx* find_best_entry(uint64_t k) {
   }
 
   return bestEntry;
+}
+
+void set_experience_enabled(bool enabled) {
+  experienceEnabled = enabled;
+  init();
+  if (enabled) {
+    resume_learning();
+  }
+}
+
+void set_experience_file(const std::string& filename) {
+  experienceFilename = filename;
+  init();
+}
+
+void set_experience_readonly(bool readonly) {
+  experienceReadonly = readonly;
 }
 
 void wait_for_loading_finished() {
@@ -622,6 +649,214 @@ void add_multipv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
     return;
 
   currentExperience->add_multipv_experience(k, m, v, d);
+}
+
+// Experience Book option setters
+void set_experience_book_enabled(bool enabled) {
+  experienceBookEnabled = enabled;
+}
+
+void set_experience_book_width(int width) {
+  experienceBookWidth = std::max(1, std::min(20, width));
+}
+
+void set_experience_book_eval_importance(int importance) {
+  experienceBookEvalImportance = std::max(0, std::min(10, importance));
+}
+
+void set_experience_book_min_depth(int depth) {
+  experienceBookMinDepth = std::max(static_cast<int>(MinDepth), std::min(64, depth));
+}
+
+void set_experience_book_max_moves(int moves) {
+  experienceBookMaxMoves = std::max(1, std::min(100, moves));
+}
+
+// Experience Book option getters
+bool get_experience_book_enabled() {
+  return experienceBookEnabled;
+}
+
+int get_experience_book_width() {
+  return experienceBookWidth;
+}
+
+int get_experience_book_eval_importance() {
+  return experienceBookEvalImportance;
+}
+
+int get_experience_book_min_depth() {
+  return experienceBookMinDepth;
+}
+
+int get_experience_book_max_moves() {
+  return experienceBookMaxMoves;
+}
+
+//=============================================================================
+// Utility Commands: defrag, merge, show_exp
+//=============================================================================
+
+// Helper function to strip quotes from filename
+static std::string unquote(const std::string& s) {
+  if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+    return s.substr(1, s.size() - 2);
+  return s;
+}
+
+// Defrag command: defragments an experience file
+// Usage: defrag <filename>
+void defrag(const std::string& filename) {
+  wait_for_loading_finished();
+  
+  std::string fn = unquote(filename);
+  
+  if (fn.empty()) {
+    printf("info string Error: No filename provided\n");
+    printf("info string Syntax: defrag <filename>\n");
+    return;
+  }
+  
+  printf("info string Defragmenting experience file: %s\n", fn.c_str());
+  
+  // Create a temporary ExperienceData to load and re-save
+  ExperienceData exp;
+  
+  if (!exp.load(fn, true)) {
+    printf("info string Error: Failed to load experience file\n");
+    return;
+  }
+  
+  // Save defragmented file
+  exp.save(fn, true, false);
+  printf("info string Defragmentation complete\n");
+}
+
+// Merge command: merges multiple experience files into one
+// Usage: merge <target_file> <source_file1> [source_file2] ...
+void merge(const std::vector<std::string>& filenames) {
+  wait_for_loading_finished();
+  
+  if (filenames.size() < 2) {
+    printf("info string Error: Incorrect merge command\n");
+    printf("info string Syntax: merge <target_file> <source_file1> [source_file2] ...\n");
+    printf("info string The first <target_file> is the destination file\n");
+    printf("info string The files <source_file1> ... are the experience files to merge\n");
+    return;
+  }
+  
+  // Collect unquoted filenames
+  std::vector<std::string> files;
+  for (const auto& fn : filenames) {
+    files.push_back(unquote(fn));
+  }
+  
+  std::string targetFilename = files.front();
+  
+  printf("info string Merging experience files:\n");
+  for (const auto& fn : files) {
+    printf("info string   %s\n", fn.c_str());
+  }
+  printf("info string Target file: %s\n", targetFilename.c_str());
+  
+  // Load and merge all files
+  ExperienceData exp;
+  
+  for (const auto& fn : files) {
+    exp.load(fn, true);
+  }
+  
+  // Save merged file
+  exp.save(targetFilename, true, false);
+  printf("info string Merge complete\n");
+}
+
+// Show_exp command: displays experience data for a position
+// Usage: show_exp (displays experience for current position)
+void show_exp(uint64_t key, bool extended) {
+  wait_for_loading_finished();
+  
+  printf("info string Experience for position key: %llu\n", 
+         static_cast<unsigned long long>(key));
+  
+  const ExpEntryEx* head = probe(key);
+  if (!head) {
+    printf("info string No experience data found for this position\n");
+    return;
+  }
+  
+  int evalImportance = get_experience_book_eval_importance();
+  
+  // Collect entries with quality scores
+  std::vector<std::pair<const ExpEntryEx*, int>> qualityList;
+  for (const ExpEntryEx* t = head; t; t = t->next) {
+    qualityList.emplace_back(t, t->quality(evalImportance));
+  }
+  
+  // Sort by quality (highest first)
+  std::stable_sort(qualityList.begin(), qualityList.end(),
+                   [](const auto& a, const auto& b) { return a.second > b.second; });
+  
+  printf("\n");
+  int expCount = 0;
+  
+  for (const auto& pr : qualityList) {
+    int32_t value = pr.first->value;
+    int32_t depth = pr.first->depth;
+    uint16_t count = pr.first->count;
+    uint16_t move = static_cast<uint16_t>(pr.first->move);
+    int quality = pr.second;
+    
+    // Extract move components using Patricia's format:
+    // from: bits 10-15, to: bits 4-9, promo: bits 2-3, type: bits 0-1
+    int from = (move >> 10) & 0x3F;
+    int to = (move >> 4) & 0x3F;
+    int promo = (move >> 2) & 0x3;
+    int type = move & 0x3;
+    
+    // Convert to algebraic notation
+    char from_file = 'a' + (from % 8);
+    char from_rank = '1' + (from / 8);
+    char to_file = 'a' + (to % 8);
+    char to_rank = '1' + (to / 8);
+    
+    char moveStr[8];
+    // type == 1 is promotion
+    if (type == 1) {
+      const char* promoChars = "nbrq";  // 0=knight, 1=bishop, 2=rook, 3=queen
+      snprintf(moveStr, sizeof(moveStr), "%c%c%c%c%c", 
+               from_file, from_rank, to_file, to_rank, promoChars[promo]);
+    } else {
+      snprintf(moveStr, sizeof(moveStr), "%c%c%c%c", 
+               from_file, from_rank, to_file, to_rank);
+    }
+    
+    // Eval string
+    char evalStr[32];
+    snprintf(evalStr, sizeof(evalStr), "cp %d", value);
+    
+    // Check for mate scores
+    constexpr int32_t VALUE_MATE = 32000;
+    constexpr int MAX_PLY = 256;
+    if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
+      int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
+      int m = (plies + 1) / 2;
+      if (value <= -VALUE_MATE + MAX_PLY) m = -m;
+      char mateStr[16];
+      snprintf(mateStr, sizeof(mateStr), " (mate %d)", m);
+      strcat(evalStr, mateStr);
+    }
+    
+    if (extended) {
+      printf("%2d: %-5s, depth: %2d, eval: %-12s, count: %5u, quality: %d\n",
+             ++expCount, moveStr, depth, evalStr, count, quality);
+    } else {
+      printf("%2d: %-5s, depth: %2d, eval: %s\n",
+             ++expCount, moveStr, depth, evalStr);
+    }
+  }
+  
+  printf("\n");
 }
 
 } // namespace Learning

@@ -1,5 +1,6 @@
 #pragma once
 #include "human.h"
+#include "learning.h"
 #include "search.h"
 #include <iostream>
 #include <memory>
@@ -163,7 +164,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  printf("Patricia Chess Engine, written by Adam Kulju\n\n\n");
+  printf("Patricia Chess Engine 5.1, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
   new_game(thread_info, TT);
   set_board(position, thread_info,
@@ -204,14 +205,22 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "uci") {
-      printf("id name Patricia 5.0\n"
+      printf("id name Patricia 5.1\n"
              "id author Adam Kulju\n"
              "option name Hash type spin default 32 min 1 max 131072\n"
              "option name Threads type spin default 1 min 1 max 1024\n"
              "option name SyzygyPath type string default null\n"
              "option name MultiPV type spin default 1 min 1 max 255\n"
              "option name Skill_Level type spin default 21 min 1 max 21\n"
-             "option name UCI_Chess960 type check default false\n");
+             "option name UCI_Chess960 type check default false\n"
+             "option name Experience Enabled type check default true\n"
+             "option name Experience File type string default patricia.exp\n"
+             "option name Experience Readonly type check default false\n"
+             "option name Experience Book type check default false\n"
+             "option name Experience Book Width type spin default 1 min 1 max 20\n"
+             "option name Experience Book Eval Importance type spin default 5 min 0 max 10\n"
+             "option name Experience Book Min Depth type spin default 27 min 4 max 64\n"
+             "option name Experience Book Max Moves type spin default 16 min 1 max 100\n");
 
       /*for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
@@ -227,15 +236,22 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "isready") {
+      Learning::init();
+      Learning::wait_for_loading_finished();
       printf("readyok\n");
     }
 
     else if (command == "setoption") {
       std::string name;
       int value;
-      input_stream >> command;
-      input_stream >> name;
-      input_stream >> command;
+      input_stream >> command; // "name"
+      
+      // Read multi-word option name until "value" keyword
+      std::string word;
+      while (input_stream >> word && word != "value") {
+        if (!name.empty()) name += " ";
+        name += word;
+      }
 
       if (name == "UCI_LimitStrength" || name == "UCI_Chess960") {
         std::string value;
@@ -261,6 +277,74 @@ void uci(ThreadInfo &thread_info, Position &position) {
         } else {
           printf("Error initializing tablebase. Please try again!\n");
         }
+        continue;
+      }
+
+      else if (name == "Experience Enabled") {
+        std::string value;
+        input_stream >> value;
+        bool enabled = (value == "true");
+        Learning::set_experience_enabled(enabled);
+        printf("info string Experience Enabled is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Experience File") {
+        std::string value;
+        input_stream >> value;
+        Learning::set_experience_file(value);
+        printf("info string Experience File is now: %s\n", value.c_str());
+        continue;
+      }
+
+      else if (name == "Experience Readonly") {
+        std::string value;
+        input_stream >> value;
+        bool readonly = (value == "true");
+        Learning::set_experience_readonly(readonly);
+        printf("info string Experience Readonly is now: %s\n", readonly ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Experience Book") {
+        std::string value;
+        input_stream >> value;
+        bool enabled = (value == "true");
+        Learning::set_experience_book_enabled(enabled);
+        printf("info string Experience Book is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Experience Book Width") {
+        int value;
+        input_stream >> value;
+        Learning::set_experience_book_width(value);
+        printf("info string Experience Book Width = %d\n", Learning::get_experience_book_width());
+        continue;
+      }
+
+      else if (name == "Experience Book Eval Importance") {
+        int value;
+        input_stream >> value;
+        Learning::set_experience_book_eval_importance(value);
+        printf("info string Experience Book Eval Importance = %d\n", Learning::get_experience_book_eval_importance());
+        continue;
+      }
+
+      else if (name == "Experience Book Min Depth") {
+        int value;
+        input_stream >> value;
+        Learning::set_experience_book_min_depth(value);
+        printf("info string Experience Book Min Depth = %d\n", Learning::get_experience_book_min_depth());
+        continue;
+      }
+
+      else if (name == "Experience Book Max Moves") {
+        int value;
+        input_stream >> value;
+        Learning::set_experience_book_max_moves(value);
+        printf("info string Experience Book Max Moves = %d\n", Learning::get_experience_book_max_moves());
+        continue;
       }
 
       input_stream >> value;
@@ -341,6 +425,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         s.join();
       }
 
+      Learning::save();
+      Learning::resume_learning();
       new_game(thread_info, TT);
       set_board(position, thread_info,
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
@@ -450,8 +536,50 @@ void uci(ThreadInfo &thread_info, Position &position) {
                         (std::max((int64_t)1, time_elapsed(start_time)))));
     }
 
+    // Experience utility commands
+    else if (command == "defrag") {
+      std::string filename;
+      if (std::getline(input_stream, filename)) {
+        // Trim leading whitespace
+        size_t start = filename.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+          filename = filename.substr(start);
+        }
+      }
+      if (filename.empty()) {
+        printf("info string Syntax: defrag <filename>\n");
+      } else {
+        Learning::defrag(filename);
+      }
+    }
+
+    else if (command == "merge") {
+      std::vector<std::string> filenames;
+      std::string token;
+      while (input_stream >> token) {
+        filenames.push_back(token);
+      }
+      Learning::merge(filenames);
+    }
+
+    else if (command == "show_exp") {
+      // Show experience for current position
+      Learning::show_exp(position.zobrist_key, false);
+    }
+
+    else if (command == "show_exp_extended") {
+      // Show extended experience for current position
+      Learning::show_exp(position.zobrist_key, true);
+    }
+
     else if (command == "bench") {
+      Learning::init();
+      Learning::wait_for_loading_finished();
+      Learning::g_benchMode = true;
+      Learning::g_benchSingleShot = true;
+      Learning::touch();
       bench(position, thread_info);
+      Learning::g_benchMode = false;
     }
   }
 }
