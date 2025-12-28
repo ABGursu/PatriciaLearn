@@ -9,6 +9,7 @@
 #include "utils.h"
 #include <cassert>
 #include <random>
+#include <array>
 
 constexpr int NormalizationFactor = 195;
 
@@ -19,14 +20,17 @@ constexpr int NormalizationFactor = 195;
 // Global UCI option variables
 inline bool fortressDetectionEnabled = false;  // UCI: Fortress Detection
 inline bool armageddonMode = false;            // UCI: Armageddon
+inline bool armageddonTbPenalty = false;       // UCI: Armageddon TB Penalty (penalize even TB draws)
 
 // Setters for UCI options
 inline void set_fortress_detection(bool enabled) { fortressDetectionEnabled = enabled; }
 inline void set_armageddon_mode(bool enabled) { armageddonMode = enabled; }
+inline void set_armageddon_tb_penalty(bool enabled) { armageddonTbPenalty = enabled; }
 
 // Getters for UCI options
 inline bool get_fortress_detection() { return fortressDetectionEnabled; }
 inline bool get_armageddon_mode() { return armageddonMode; }
+inline bool get_armageddon_tb_penalty() { return armageddonTbPenalty; }
 
 // Armageddon draw penalty constant
 constexpr int ArmageddonPenalty = ScoreMate / 2;
@@ -35,9 +39,9 @@ constexpr int ArmageddonPenalty = ScoreMate / 2;
 // In Armageddon mode, draws are bad for US (root side), good for opponent
 // At even ply (our turn): return negative (bad for us)
 // At odd ply (opponent's turn): return positive (good for them, which negates to bad for us at parent)
-// tb_draw: if true, no penalty applied (TB draws are exempt)
+// tb_draw: if true, no penalty applied (unless armageddonTbPenalty is enabled)
 inline int get_draw_value_armageddon(int ply, bool tb_draw = false) {
-  if (armageddonMode && !tb_draw) {
+  if (armageddonMode && (!tb_draw || armageddonTbPenalty)) {
     // Even ply = our turn (root side), odd ply = opponent's turn
     return (ply % 2 == 0) ? -ArmageddonPenalty : ArmageddonPenalty;
   }
@@ -45,26 +49,194 @@ inline int get_draw_value_armageddon(int ply, bool tb_draw = false) {
 }
 
 // ============================================================================
-// UPCOMING REPETITION DETECTION (Crystal port - simplified for Patricia)
+// ARMAGEDDON: Rule 50 scaling - penalize positions approaching 50-move draw
+// ============================================================================
+// Returns scale factor 0-100. At 100 = no scaling, at 0 = full draw penalty
+inline int armageddon_rule50_scale(int halfmoves) {
+  if (!armageddonMode || halfmoves < 60) return 100;  // No scaling until move 60
+  // From halfmove 60 onwards, gradually reduce eval toward draw
+  // At 100 halfmoves, scale is 0 (full draw penalty)
+  return std::max(0, 100 - (halfmoves - 60) * 100 / 40);
+}
+
+// Apply rule50 scaling to evaluation (Armageddon only)
+inline int apply_armageddon_rule50_scaling(int eval, int halfmoves, int ply) {
+  if (!armageddonMode || halfmoves < 60) return eval;
+  int scale = armageddon_rule50_scale(halfmoves);
+  if (scale >= 100) return eval;
+  // Blend evaluation toward draw penalty
+  int draw_penalty = get_draw_value_armageddon(ply, false);
+  return (eval * scale + draw_penalty * (100 - scale)) / 100;
+}
+
+// ============================================================================
+// CUCKOO HASHING FOR UPCOMING REPETITION DETECTION
+// ============================================================================
+// Based on Crystal/Stockfish implementation
+// See: http://web.archive.org/web/20201107002606/https://marcelk.net/2013-04-06/paper/upcoming-rep-v2.pdf
+
+// Hash functions for Cuckoo table indexing
+inline int cuckoo_h1(uint64_t h) { return h & 0x1fff; }
+inline int cuckoo_h2(uint64_t h) { return (h >> 16) & 0x1fff; }
+
+// Cuckoo tables - 8192 entries each
+inline std::array<uint64_t, 8192> cuckooKeys;
+inline std::array<Move, 8192> cuckooMoves;
+inline bool cuckooInitialized = false;
+
+// Get piece attacks for Cuckoo initialization
+inline uint64_t get_cuckoo_piece_attacks(int piece_type, int sq, uint64_t occ) {
+  switch (piece_type) {
+    case PieceTypes::Knight: return KnightAttacks[sq];
+    case PieceTypes::Bishop: return get_bishop_attacks(sq, occ);
+    case PieceTypes::Rook: return get_rook_attacks(sq, occ);
+    case PieceTypes::Queen: return get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
+    case PieceTypes::King: return KingAttacks[sq];
+    default: return 0;
+  }
+}
+
+// Initialize Cuckoo tables at engine startup
+inline void init_cuckoo() {
+  if (cuckooInitialized) return;
+  
+  cuckooKeys.fill(0);
+  cuckooMoves.fill(MoveNone);
+  
+  // Generate all reversible piece moves (non-pawn pieces)
+  // For each piece type and color, generate all possible from-to pairs
+  for (int piece = Pieces::WKnight; piece <= Pieces::BKing; piece++) {
+    int piece_type = get_piece_type(piece);
+    if (piece_type == PieceTypes::Pawn) continue;  // Skip pawns
+    
+    for (int s1 = 0; s1 < 64; s1++) {
+      uint64_t attacks = get_cuckoo_piece_attacks(piece_type, s1, 0ULL);
+      
+      while (attacks) {
+        int s2 = pop_lsb(attacks);
+        if (s2 <= s1) continue;  // Avoid duplicates (only store s1 < s2)
+        
+        // Compute Zobrist key for moving piece from s1 to s2
+        // Key = piece[s1] XOR piece[s2] XOR side_to_move
+        uint64_t key = zobrist_keys[get_zobrist_key(piece, s1)] ^ 
+                       zobrist_keys[get_zobrist_key(piece, s2)] ^ 
+                       zobrist_keys[side_index];
+        
+        Move move = pack_move(s1, s2, MoveTypes::Normal);
+        int i = cuckoo_h1(key);
+        
+        // Cuckoo insertion with displacement
+        while (true) {
+          std::swap(cuckooKeys[i], key);
+          std::swap(cuckooMoves[i], move);
+          if (move == MoveNone) break;  // Found empty slot
+          // Push victim to alternative slot
+          i = (i == cuckoo_h1(key)) ? cuckoo_h2(key) : cuckoo_h1(key);
+        }
+      }
+    }
+  }
+  
+  cuckooInitialized = true;
+}
+
+// ============================================================================
+// UPCOMING REPETITION DETECTION (Crystal port with Cuckoo hashing)
 // ============================================================================
 // Tests if there's an upcoming move that draws by repetition
-// This is a simplified version without Cuckoo hashing
+// Uses Cuckoo hashing for accurate detection of reversible moves
 inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_info) {
   int halfmoves = position.halfmoves;
   int game_ply = thread_info.game_ply;
+  int search_ply = thread_info.search_ply;
   
   if (halfmoves < 3)
     return false;
-    
-  uint64_t current_key = position.zobrist_key;
   
-  // Check if any position 2, 4, 6... moves ago matches
-  // This indicates we could repeat with a reversing move
+  // Ensure Cuckoo tables are initialized
+  if (!cuckooInitialized) {
+    init_cuckoo();
+  }
+    
+  uint64_t originalKey = position.zobrist_key;
+  int end = std::min((int)halfmoves, game_ply);
+  
+  // Simple hash-based check first (fast path)
+  // Check if current position matches any position 2, 4, 6... moves ago
   int start_index = game_ply - 2;
-  int end_index = std::max(game_ply - halfmoves, 0);
+  int end_index = std::max(game_ply - end, 0);
   
   for (int i = start_index; i >= end_index; i -= 2) {
-    if (current_key == thread_info.game_hist[i].position_key) {
+    if (originalKey == thread_info.game_hist[i].position_key) {
+      return true;
+    }
+  }
+  
+  // Cuckoo-based detection for reversible moves
+  // This detects if ANY legal reversing move would create a repetition
+  if (end >= 3) {
+    uint64_t other = originalKey;
+    
+    if (game_ply >= 1) {
+      other ^= thread_info.game_hist[game_ply - 1].position_key ^ zobrist_keys[side_index];
+    }
+    
+    for (int i = 3; i <= end; i += 2) {
+      int idx1 = game_ply - i;
+      int idx2 = game_ply - i - 1;
+      
+      if (idx1 < 0 || idx2 < 0) break;
+      
+      other ^= thread_info.game_hist[idx1].position_key ^ 
+               thread_info.game_hist[idx2].position_key ^ 
+               zobrist_keys[side_index];
+      
+      if (other != 0) continue;
+      
+      // Check Cuckoo table for reversible move
+      uint64_t moveKey = originalKey ^ thread_info.game_hist[idx1].position_key;
+      int j;
+      
+      if ((j = cuckoo_h1(moveKey), cuckooKeys[j] == moveKey) || 
+          (j = cuckoo_h2(moveKey), cuckooKeys[j] == moveKey)) {
+        
+        Move move = cuckooMoves[j];
+        if (move != MoveNone) {
+          int from = extract_from(move);
+          int to = extract_to(move);
+          
+          // Check if path between squares is clear
+          uint64_t occ = position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
+          uint64_t between = BetweenBBs[from][to];
+          
+          // Path is clear if no pieces block it (excluding destination)
+          if (!((between ^ (1ULL << to)) & occ)) {
+            if (search_ply > i)
+              return true;
+            
+            // For positions at or before root, check repetition count
+            if (thread_info.game_hist[idx1].repetition > 0)
+              return true;
+          }
+        }
+      }
+    }
+  }
+  
+  return false;
+}
+
+// ============================================================================
+// HELPER: Check if a move would cause repetition (for move ordering)
+// ============================================================================
+inline bool would_cause_repetition(const Position &pos, ThreadInfo &thread_info) {
+  uint64_t key = pos.zobrist_key;
+  int halfmoves = pos.halfmoves;
+  int game_ply = thread_info.game_ply;
+  
+  int end_index = std::max(game_ply - halfmoves, 0);
+  for (int i = game_ply - 2; i >= end_index; i -= 2) {
+    if (key == thread_info.game_hist[i].position_key) {
       return true;
     }
   }
@@ -319,6 +491,20 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
   thread_info.game_hist[thread_info.game_ply].is_cap = is_cap(position, move);
   thread_info.game_hist[thread_info.game_ply].m_diff = material_eval(position);
 
+  // IMPROVEMENT 5: Track repetition count for Cuckoo hashing
+  int8_t rep_count = 0;
+  int halfmoves = position.halfmoves;
+  int game_ply = thread_info.game_ply;
+  uint64_t key = position.zobrist_key;
+  int end_index = std::max(game_ply - halfmoves, 0);
+  for (int i = game_ply - 2; i >= end_index; i -= 2) {
+    if (thread_info.game_hist[i].position_key == key) {
+      rep_count = thread_info.game_hist[i].repetition + 1;
+      break;
+    }
+  }
+  thread_info.game_hist[thread_info.game_ply].repetition = rep_count;
+
   thread_info.game_ply++;
 }
 
@@ -518,6 +704,20 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   // Crystal: gameCycle detection in qsearch (ONLY when Fortress Detection is enabled)
   bool gameCycle = false;
   
+  // ============================================================================
+  // ARMAGEDDON: Standalone upcoming repetition check (independent of Fortress)
+  // ============================================================================
+  if (armageddonMode && !fortressDetectionEnabled) {
+    // When Armageddon is ON but Fortress is OFF, still check upcoming repetition
+    if (upcoming_repetition(position, thread_info)) {
+      int drawValue = get_draw_value_armageddon(ply, false);
+      if (drawValue >= beta)
+        return drawValue;
+      alpha = std::max(alpha, drawValue);
+    }
+  }
+  
+  // Fortress Detection: gameCycle check (sets gameCycle flag for pruning decisions)
   if (fortressDetectionEnabled) {
     if (upcoming_repetition(position, thread_info)) {
       int drawValue = get_draw_value_armageddon(ply, false);
@@ -655,7 +855,15 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   }
 
   if (best_score == ScoreNone) { // handle no legal moves (stalemate/checkmate)
-    return ply - ScoreMate;
+    // In qsearch with no moves: if in check = checkmate, else = stalemate
+    if (in_check) {
+      return ply - ScoreMate;  // Checkmate
+    }
+    // Stalemate - apply Armageddon penalty if enabled (FIX 2)
+    if (armageddonMode) {
+      return get_draw_value_armageddon(ply, false);
+    }
+    return 0;  // Normal stalemate = draw
   }
 
   // insert entries and return
@@ -702,6 +910,19 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   if (out_of_time(thread_info) || ply >= MaxSearchDepth - 1) {
     // check for timeout
     return correct_eval(position, thread_info, eval(position, thread_info));
+  }
+
+  // ============================================================================
+  // ARMAGEDDON: Standalone upcoming repetition check (independent of Fortress)
+  // ============================================================================
+  if (armageddonMode && !fortressDetectionEnabled && !root) {
+    // When Armageddon is ON but Fortress is OFF, still check upcoming repetition
+    if (upcoming_repetition(position, thread_info)) {
+      int drawValue = get_draw_value_armageddon(ply, false);
+      if (drawValue >= beta)
+        return drawValue;
+      alpha = std::max(alpha, drawValue);
+    }
   }
 
   // ============================================================================
@@ -917,7 +1138,12 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       tb_score = ScoreTbWin - ply;
       tb_bound = EntryTypes::LBound;
     } else {
-      tb_score = 0;
+      // TB Draw - apply Armageddon penalty if armageddonTbPenalty is enabled (IMPROVEMENT 8)
+      if (armageddonMode && armageddonTbPenalty) {
+        tb_score = get_draw_value_armageddon(ply, false);  // Treat TB draw like regular draw
+      } else {
+        tb_score = 0;  // Normal: TB draws are exempt from Armageddon penalty
+      }
       tb_bound = EntryTypes::Exact;
     }
 
@@ -969,6 +1195,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   ss->static_eval = static_eval;
 
+  // ============================================================================
+  // ARMAGEDDON: Rule 50 scaling - penalize positions approaching 50-move draw (FIX 4)
+  // ============================================================================
+  if (armageddonMode && !in_check && static_eval != ScoreNone) {
+    static_eval = apply_armageddon_rule50_scaling(static_eval, position.halfmoves, ply);
+  }
+
   bool improving = false;
 
   // Improving: Is our eval better than it was last turn? If so we can prune
@@ -1010,9 +1243,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         static_eval - RFPMargin * (depth - improving) >= beta) {
       return (static_eval + beta) / 2;
     }
-    
-    // Null Move Pruning (NMP): If we can give our opponent a free move and
-    // still beat beta on a reduced search, we can prune the node.
+
+      // Null Move Pruning (NMP): If we can give our opponent a free move and
+      // still beat beta on a reduced search, we can prune the node.
     // Skip if gameCycle (only when Fortress Detection enabled)
     
     if (!skipForGameCycle && static_eval >= beta && depth >= NMPMinDepth &&
@@ -1042,8 +1275,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  // Internal Iterative Reduction: If we are in a PV node and have no TT move,
-  // reduce the depth.
+    // Internal Iterative Reduction: If we are in a PV node and have no TT move,
+    // reduce the depth.
   // Skip if gameCycle (only when Fortress Detection enabled)
   bool skipForGameCycleIIR = fortressDetectionEnabled && gameCycle;
   if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth && !skipForGameCycleIIR) {
@@ -1140,6 +1373,18 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         thread_info.HistoryScores[position.board[extract_from(move)]]
                                  [extract_to(move)];
 
+    // ============================================================================
+    // IMPROVEMENT 6: Armageddon-aware Move Ordering
+    // ============================================================================
+    // Penalize moves that would lead to repetition when Armageddon is enabled
+    if (armageddonMode && !root) {
+      Position temp = position;
+      make_move(temp, move);
+      if (would_cause_repetition(temp, thread_info)) {
+        hist_score -= 3000;  // Heavy penalty in move ordering for repetition moves
+      }
+    }
+
     is_capture = is_cap(position, move);
     
     // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when Fortress Detection enabled)
@@ -1194,6 +1439,29 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         extension = 2;
       }
     }
+    
+    // ============================================================================
+    // IMPROVEMENT 7: Armageddon Extension for Draw-Avoiding Moves
+    // ============================================================================
+    // When in Armageddon mode and position is drawish, extend to find winning resources
+    if (armageddonMode && !fortressDetectionEnabled && extension == 0) {
+      // Check if position is drawish (high halfmoves or upcoming repetition)
+      bool drawish = position.halfmoves > 50;
+      if (!drawish && !root) {
+        // Check if this move avoids a repetition
+        Position temp = position;
+        make_move(temp, move);
+        if (!would_cause_repetition(temp, thread_info)) {
+          // This move doesn't cause repetition - might be an escape
+          if (position.halfmoves > 30 || material_draw(position)) {
+            drawish = true;
+          }
+        }
+      }
+      if (drawish && depth < 6 && !is_capture) {
+        extension = 1;  // Extend to find winning resources
+      }
+    }
 
     // Singular Extensions (SE): If a search finds that the TT move is way
     // better than all other moves, extend it under certain conditions.
@@ -1245,7 +1513,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // making this technique more than worth it.
     // If that beats alpha, we search at normal depth with null window
     // If that also beats alpha, we search at normal depth with full window.
-    
+
     // Original Patricia LMR condition: depth >= LMRMinDepth && moves_played > is_pv
     // Crystal adds: skip when gameCycle, extra (!is_pv || ply > 1) condition
     bool allowLMR;
@@ -1371,7 +1639,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (best_score == ScoreNone) { // handle no legal moves (stalemate/checkmate)
-    return singular_search ? alpha : in_check ? (ply - ScoreMate) : 0;
+    if (singular_search) return alpha;
+    if (in_check) return ply - ScoreMate;  // Checkmate
+    // Stalemate - apply Armageddon penalty if enabled (FIX 2)
+    if (armageddonMode) {
+      return get_draw_value_armageddon(ply, false);
+    }
+    return 0;  // Normal stalemate = draw
   }
 
   if (best_score >= beta) {

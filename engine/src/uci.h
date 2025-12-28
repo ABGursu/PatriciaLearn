@@ -222,7 +222,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Experience Book Min Depth type spin default 27 min 4 max 64\n"
              "option name Experience Book Max Moves type spin default 16 min 1 max 100\n"
              "option name Fortress Detection type check default false\n"
-             "option name Armageddon type check default false\n");
+             "option name Armageddon type check default false\n"
+             "option name Armageddon TB Penalty type check default false\n");
 
       /*for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
@@ -362,11 +363,22 @@ void uci(ThreadInfo &thread_info, Position &position) {
       }
 
       else if (name == "Armageddon") {
-        std::string value;
-        input_stream >> value;
-        bool enabled = (value == "true");
+        // Just "Armageddon" - the "value" keyword was already consumed
+        std::string val;
+        input_stream >> val;  // true/false
+        bool enabled = (val == "true");
         set_armageddon_mode(enabled);
         printf("info string Armageddon mode is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Armageddon TB Penalty") {
+        // The multi-word name was already parsed, "value" was already consumed
+        std::string val;
+        input_stream >> val;  // true/false
+        bool enabled = (val == "true");
+        set_armageddon_tb_penalty(enabled);
+        printf("info string Armageddon TB Penalty is now: %s\n", enabled ? "enabled" : "disabled");
         continue;
       }
 

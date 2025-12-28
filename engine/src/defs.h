@@ -143,6 +143,7 @@ struct GameHistory { // keeps the state of the board at a particular point in
   int16_t m_diff;
   int32_t static_eval;
   int16_t quietMoveStreak = 0; // Crystal: track consecutive quiet moves (reset only on capture)
+  int8_t repetition = 0;       // IMPROVEMENT 5: Count of times this position occurred (for Cuckoo)
 };
 
 // TT stuff
