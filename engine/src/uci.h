@@ -289,6 +289,23 @@ void uci(ThreadInfo &thread_info, Position &position) {
         if (!name.empty()) name += " ";
         name += word;
       }
+      
+      // Normalize option name: trim leading/trailing spaces (for ChessBase compatibility)
+      // Remove any extra spaces that ChessBase might add
+      while (!name.empty() && name[0] == ' ') name.erase(0, 1);
+      while (!name.empty() && name.back() == ' ') name.pop_back();
+      
+      // Debug: Log received option name (for ChessBase .uci file debugging)
+      printf("info string Received option: '%s'\n", name.c_str());
+      
+      // Helper function to compare option names case-insensitively (for ChessBase compatibility)
+      auto case_insensitive_compare = [](const std::string& a, const std::string& b) -> bool {
+        if (a.length() != b.length()) return false;
+        for (size_t i = 0; i < a.length(); i++) {
+          if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+      };
 
       if (name == "UCI_LimitStrength" || name == "UCI_Chess960") {
         std::string value;
@@ -317,7 +334,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Enabled") {
+      else if (name == "Experience Enabled" || case_insensitive_compare(name, "Experience Enabled")) {
         std::string value;
         input_stream >> value;
         bool enabled = (value == "true");
@@ -326,7 +343,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience File") {
+      else if (name == "Experience File" || case_insensitive_compare(name, "Experience File")) {
         std::string value;
         input_stream >> value;
         Learning::set_experience_file(value);
@@ -387,7 +404,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
       // ========================================================================
       // FORTRESS DETECTION & ARMAGEDDON MODE (Crystal port)
       // ========================================================================
-      else if (name == "Fortress Detection") {
+      // Support both exact match and case-insensitive match for ChessBase compatibility
+      else if (name == "Fortress Detection" || case_insensitive_compare(name, "Fortress Detection")) {
         std::string value;
         input_stream >> value;
         bool enabled = (value == "true");
@@ -396,7 +414,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Armageddon") {
+      else if (name == "Armageddon" || case_insensitive_compare(name, "Armageddon")) {
         // Just "Armageddon" - the "value" keyword was already consumed
         std::string val;
         input_stream >> val;  // true/false
@@ -406,7 +424,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Armageddon Psychology") {
+      else if (name == "Armageddon Psychology" || case_insensitive_compare(name, "Armageddon Psychology")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
         input_stream >> val;  // true/false
@@ -416,7 +434,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Armageddon TB Penalty") {
+      else if (name == "Armageddon TB Penalty" || case_insensitive_compare(name, "Armageddon TB Penalty")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
         input_stream >> val;  // true/false

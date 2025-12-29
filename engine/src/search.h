@@ -1212,39 +1212,12 @@ int eval(Position &position, ThreadInfo &thread_info) {
   eval = eval * multiplier;
 
   // ============================================================================
-  // ARMAGEDDON PSYCHOLOGY: Pressure Index & Complexity Bias (CACHED) - OPTIMIZED
+  // ARMAGEDDON PSYCHOLOGY: Opponent Mobility Squeeze (Quiet Forcing Moves)
   // ============================================================================
-  // This block handles "psychological" bonuses (complexity/sharpness) - separate from base Armageddon penalties
-  // NNUE-compatible: Bonuslar makul aralıkta tutulur (max ~150 cp total)
-  if (armageddonPsychology) {
-    int currentScore = eval + bonus1 + bonus2;  // Calculate once
-    
-    // Only apply psychology bonuses if game is not completely lost/won (within reasonable range)
-    if (abs(currentScore) < 400) {
-      // ADIM 3: The Pressure Score - Sharpness * Complexity (CACHED, improved scaling)
-      // This combines both sharpness (opponent's safe moves) and complexity (position noise)
-      int pressure_bonus = calculate_pressure_bonus(position, thread_info);
-      eval += pressure_bonus;
-      
-      // KATMAN 3: Tactical Volatility Index - Bonus for chaotic positions when losing/drawing (CACHED)
-      // Genişletilmiş kullanım: Sadece currentScore <= 10 değil, <= 50'ye kadar
-      if (currentScore <= 50) {
-        int volatility = calculate_tactical_volatility(position, thread_info);
-        
-        // Volatility'yi score'a göre scale et
-        // Kaybeden durumlarda daha fazla, beraberlik yakın durumlarda daha az
-        if (currentScore <= 10) {
-          eval += volatility;  // Full volatility (kaybeden durumlar)
-        } else {
-          eval += volatility / 2;  // Half volatility (beraberlik yakın durumlar)
-        }
-      }
-      
-      // REMOVED: calculate_complexity() çağrısı kaldırıldı
-      // Çünkü zaten calculate_pressure_bonus() içinde complexity kullanılıyor
-      // Duplicate bonus NNUE evaluation'ı bozuyordu
-    }
-  }
+  // NEW APPROACH: No panic thresholds - Psychology is always active when enabled
+  // Goal: Reward positions where opponent has restricted mobility (quiet forcing moves)
+  // This is applied in move scoring, not in static evaluation
+  // (Static eval doesn't know which move led to this position)
 
   return std::clamp(eval + bonus1 + bonus2, ScoreLost + 1, ScoreWin - 1);
 }
@@ -2228,6 +2201,37 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     is_capture = is_cap(position, move);
     
+    // ============================================================================
+    // ARMAGEDDON PSYCHOLOGY: Quiet Forcing Moves (Opponent Mobility Squeeze) - MOVE ORDERING
+    // ============================================================================
+    // NEW APPROACH: Reward quiet moves that restrict opponent's mobility in move ordering
+    // Only applies to QUIET moves (not captures) - these are "forcing" in a positional sense
+    // Goal: Force opponent into "only-move" situations through space restriction, not tactics
+    // NOTE: This is Psychology feature, not base Armageddon (draw penalties)
+    // OPTIMIZATION: Only calculate for quiet moves when Psychology is enabled
+    if (armageddonPsychology && !is_capture) {
+      // Create temporary position to check opponent's mobility after this move
+      Position temp_position = position;
+      make_move(temp_position, move);
+      
+      // Check opponent's mobility squeeze level after our quiet move (fast bitboard calculation)
+      // estimate_sharpness_bitboard returns 0-5: higher = more restricted opponent
+      int opp_squeeze = estimate_sharpness_bitboard(temp_position);
+      
+      // Bonus: The more we restrict opponent's mobility, the better
+      // This encourages quiet moves that force opponent into limited options
+      // Applied to hist_score for better move ordering
+      if (opp_squeeze >= 4) {
+        hist_score += 50;  // Strong bonus - opponent extremely restricted (EXTREME squeeze)
+      } else if (opp_squeeze >= 3) {
+        hist_score += 35;  // Good bonus - opponent highly restricted (HIGH squeeze)
+      } else if (opp_squeeze >= 2) {
+        hist_score += 20;  // Moderate bonus - opponent moderately restricted
+      } else if (opp_squeeze >= 1) {
+        hist_score += 10;  // Small bonus - opponent slightly restricted
+      }
+    }
+    
     // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when Fortress Detection enabled)
     if (fortressDetectionEnabled) {
       ss->quietMoveStreak = is_capture ? 0 : (ss - 1)->quietMoveStreak + 1;
@@ -2369,26 +2373,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     ss_push(position, thread_info, move);
 
-    // ============================================================================
-    // THE RAZOR'S EDGE KATMAN 2: Singularity Exploitation (Armageddon Psychology Only) - OPTIMIZED
-    // ============================================================================
-    // After making a move, check if opponent is now in a singular position
-    // If so, give bonus to this move (it forces opponent into "only-move" situation)
-    // OPTIMIZED: Uses fast bitboard-based sharpness estimation instead of expensive move generation
-    // NOTE: This is Psychology feature, not base Armageddon (draw penalties)
-    int singularity_bonus = 0;
-    if (armageddonPsychology && !root && depth >= 3) {
-      // Check opponent's sharpness level after our move (fast bitboard calculation)
-      int opp_sharpness = estimate_sharpness_bitboard(moved_position);
-      
-      // If opponent is in a sharp position (high sharpness = restricted), this move is valuable
-      if (opp_sharpness >= 3) {
-        singularity_bonus = 30;  // Strong bonus - opponent is in critical position (EXTREME or HIGH)
-      } else if (opp_sharpness >= 2) {
-        singularity_bonus = 15;  // Moderate bonus - opponent has limited options (HIGH)
-      }
-    }
-
     bool full_search = false;
     int newdepth = std::min(depth - 1 + extension, 126);
 
@@ -2474,15 +2458,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     ss_pop(thread_info);
     thread_info.phase = phase;
-
-    // ============================================================================
-    // THE RAZOR'S EDGE KATMAN 2: Apply Singularity Bonus to Score
-    // ============================================================================
-    // If this move forces opponent into singular position, add bonus
-    // Note: score is from opponent's perspective (negative), so we subtract bonus
-    if (armageddonPsychology && singularity_bonus > 0) {
-      score += singularity_bonus;  // Add bonus (score is negative, so this makes it less negative = better for us)
-    }
 
     if (thread_data.stop || thread_info.datagen_stop) {
       // return if we ran out of time for search
