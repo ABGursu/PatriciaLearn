@@ -97,6 +97,42 @@ struct alignas(64) ThreadInfo {
       pressure_bonus = -1;
     }
   } armaCache;
+  
+  // ============================================================================
+  // MATERIAL CACHE: Performance optimization for material calculations
+  // ============================================================================
+  // Cache for material_eval and total_mat (these values are constant for a position)
+  struct MaterialCache {
+    uint64_t key = 0;          // Position Zobrist Key
+    int16_t material_eval = 0;  // Cached material_eval result
+    int16_t total_mat = 0;     // Cached total_mat result
+    bool valid = false;        // Whether cache is valid
+    
+    void clear() {
+      key = 0;
+      material_eval = 0;
+      total_mat = 0;
+      valid = false;
+    }
+  } materialCache;
+  
+  // ============================================================================
+  // SEE CACHE: Performance optimization for Static Exchange Evaluation
+  // ============================================================================
+  // Cache for SEE results (Move + Position Key -> Result)
+  struct SEECache {
+    uint64_t key = 0;          // Position Zobrist Key
+    Move move = MoveNone;      // Move that was evaluated
+    bool result = false;        // Cached SEE result
+    bool valid = false;        // Whether cache is valid
+    
+    void clear() {
+      key = 0;
+      move = MoveNone;
+      result = false;
+      valid = false;
+    }
+  } seeCache;
 };
 
 RootMoveInfo *find_root_move(ThreadInfo &thread_info, Move move) {
@@ -137,6 +173,13 @@ void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   std::memset(&TT[0], 0, TT_size * sizeof(TT[0]));
   thread_info.searches = 0;
   thread_info.cp_accum_loss = 0;
+  
+  // ============================================================================
+  // RESET ALL CACHES: New game, invalidate all caches
+  // ============================================================================
+  thread_info.armaCache.clear();
+  thread_info.materialCache.clear();
+  thread_info.seeCache.clear();
   
   // ============================================================================
   // RESET ARMAGEDDON CACHE: New game, invalidate cache (OPTIMIZED)
