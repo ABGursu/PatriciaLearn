@@ -3,8 +3,10 @@
 #include "nnue.h"
 #include "params.h"
 #include <condition_variable>
+#include <fstream>
 #include <mutex>
 #include <stdio.h>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -372,3 +374,21 @@ private:
 Barrier reset_barrier{1};
 Barrier idle_barrier{1};
 Barrier search_end_barrier{1};
+
+// ============================================================================
+// DEBUG LOGGING SYSTEM
+// ============================================================================
+// Simple debug log file - writes all output to both stdout and debug.log
+namespace Debug {
+  void init();
+  void close();
+  void log(const char* str);
+  void logf(const char* format, ...);
+}
+
+// Macro to intercept all printf calls and log them to both stdout and debug.log
+// This ensures ALL engine output is logged without breaking UCI communication
+#ifdef printf
+#undef printf
+#endif
+#define printf(...) Debug::logf(__VA_ARGS__)

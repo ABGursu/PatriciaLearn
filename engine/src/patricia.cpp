@@ -2,6 +2,56 @@
 #include "uci.h"
 #include <memory>
 #include <stdio.h>
+#include <fstream>
+#include <cstdarg>
+
+// Simple debug log implementation - writes all output to both stdout and debug.log
+// This does NOT redirect stdout, so UCI communication works normally
+namespace Debug {
+  static std::ofstream log_file;
+  
+  void init() {
+    log_file.open("debug.log", std::ios::out | std::ios::app);
+  }
+  
+  void logf(const char* format, ...) {
+    char buffer[4096];
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    if (len > 0) {
+      // Write to stdout (for UCI communication) - stdout is NOT redirected
+      fputs(buffer, stdout);
+      fflush(stdout);
+      
+      // Also write to log file
+      if (log_file.is_open()) {
+        log_file << buffer;
+        log_file.flush();
+      }
+    }
+  }
+  
+  void log(const char* str) {
+    // Write to stdout (for UCI communication) - stdout is NOT redirected
+    fputs(str, stdout);
+    fflush(stdout);
+    
+    // Also write to log file
+    if (log_file.is_open()) {
+      log_file << str;
+      log_file.flush();
+    }
+  }
+  
+  void close() {
+    if (log_file.is_open()) {
+      log_file.close();
+    }
+  }
+}
 
 int main(int argc, char *argv[]) {
   Position position;

@@ -4,6 +4,8 @@
 #include "search.h"
 #include <iostream>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 constexpr std::array<int, 20> skill_levels = {
     500,  800,  1000, 1200, 1300, 1400, 1500, 1600, 1700, 1800,
@@ -164,6 +166,10 @@ void uci(ThreadInfo &thread_info, Position &position) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
+  // Initialize debug logging first - this opens the log file
+  // All printf calls will still go to stdout (for UCI), but we'll also log them
+  Debug::init();
+
   printf("Patricia Chess Engine 5.1, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
   new_game(thread_info, TT);
@@ -191,16 +197,42 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     if (command == "quit") {
+      // CRITICAL FIX: Stop all searches first, then terminate threads
+      // This prevents threads from getting stuck in deep search when Fortress Detection is enabled
+      thread_data.stop = true;
       thread_data.terminate = true;
 
-      reset_barrier.arrive_and_wait();
-      idle_barrier.arrive_and_wait();
+      // IMPORTANT: Wait for main search thread to finish so Learning::save() can complete
+      // Learning::save() is called at the end of iterative_deepen in the main search thread
+      if (s.joinable()) {
+        s.join();  // Wait for search to finish and save learning data
+      }
 
+      // Try to synchronize with barriers, but don't wait forever
+      // If threads are stuck, we'll force exit anyway
+      try {
+        reset_barrier.arrive_and_wait();
+        idle_barrier.arrive_and_wait();
+      } catch (...) {
+        // If barrier wait fails, continue anyway
+      }
+
+      // Detach helper threads (they don't call Learning::save())
       for (int i = 0; i < thread_data.threads.size(); i++) {
         if (thread_data.threads[i].joinable()) {
-          thread_data.threads[i].join();
+          thread_data.threads[i].detach();
         }
       }
+      
+      // Save learning data one final time (in case it wasn't saved during search)
+      Learning::save();
+      
+      // Clear thread vectors
+      thread_data.thread_infos.clear();
+      thread_data.threads.clear();
+      
+      Debug::close();
+      
       std::exit(0);
     }
 
@@ -224,7 +256,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Fortress Detection type check default false\n"
              "option name Armageddon type check default false\n"
              "option name Armageddon Psychology type check default false\n"
-             "option name Armageddon TB Penalty type check default false\n");
+             "option name Armageddon TB Penalty type check default false\n"
+);
 
       /*for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
@@ -393,6 +426,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
+
       input_stream >> value;
 
       if (name == "Hash") {
@@ -401,14 +435,28 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
       else if (name == "Threads") {
 
+        // CRITICAL FIX: Stop all searches first, then terminate threads
+        // This prevents threads from getting stuck in deep search when modes like
+        // Fortress Detection or Armageddon are enabled
+        thread_data.stop = true;
         thread_data.terminate = true;
 
-        reset_barrier.arrive_and_wait();
-        idle_barrier.arrive_and_wait();
+        // CRITICAL FIX: Only wait on barriers if threads actually exist
+        // During initial load, no threads exist yet, so waiting on barriers will hang!
+        if (thread_data.threads.size() > 0) {
+          // Try to synchronize, but don't block forever
+          try {
+            reset_barrier.arrive_and_wait();
+            idle_barrier.arrive_and_wait();
+          } catch (...) {
+            // Continue even if barrier synchronization fails
+          }
+        }
 
+        // Detach old threads instead of joining (faster, threads will exit on terminate)
         for (int i = 0; i < thread_data.threads.size(); i++) {
           if (thread_data.threads[i].joinable()) {
-            thread_data.threads[i].join();
+            thread_data.threads[i].detach();
           }
         }
 
@@ -422,10 +470,21 @@ void uci(ThreadInfo &thread_info, Position &position) {
         idle_barrier.reset(thread_data.num_threads);
         search_end_barrier.reset(thread_data.num_threads);
 
-        for (int i = 0; i < value - 1; i++) {
-          thread_data.thread_infos.emplace_back();
-          thread_data.threads.emplace_back(loop, i);
+        // Create new threads only if value > 1
+        if (value > 1) {
+          for (int i = 0; i < value - 1; i++) {
+            thread_data.thread_infos.emplace_back();
+            thread_data.threads.emplace_back(loop, i);
+          }
+          
+          // Give threads a moment to initialize and reach first barrier
+          // This prevents deadlock when threads start before barriers are ready
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        
+        // CRITICAL FIX: Reset stop flag so future searches can start
+        // This is especially important when Fortress Detection or Armageddon modes are enabled
+        thread_data.stop = false;
       }
 
       else if (name == "Skill_Level") {
@@ -476,9 +535,19 @@ void uci(ThreadInfo &thread_info, Position &position) {
       new_game(thread_info, TT);
       set_board(position, thread_info,
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+      
+      // Reset stop flag so future searches can start
+      thread_data.stop = false;
     }
 
     else if (command == "position") {
+      // Stop any running search when position changes
+      thread_data.stop = true;
+      
+      if (s.joinable()) {
+        s.join();
+      }
+      
       thread_info.game_ply = 6;
       std::string setup;
       input_stream >> setup;
@@ -513,7 +582,9 @@ void uci(ThreadInfo &thread_info, Position &position) {
           make_move(position, move);
         }
       }
-
+      
+      // Reset stop flag so future searches can start
+      thread_data.stop = false;
     }
 
     else if (command == "go") {

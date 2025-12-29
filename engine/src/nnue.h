@@ -1,5 +1,6 @@
 #pragma once
 #include "defs.h"
+#include "bitboard.h"
 #include "simd.h"
 #include <algorithm>
 #include <array>

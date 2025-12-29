@@ -10,6 +10,8 @@
 #include <cassert>
 #include <random>
 #include <array>
+#include <atomic>
+#include <mutex>
 
 constexpr int NormalizationFactor = 195;
 
@@ -107,7 +109,8 @@ inline int cuckoo_h2(uint64_t h) { return (h >> 16) & 0x1fff; }
 // Cuckoo tables - 8192 entries each
 inline std::array<uint64_t, 8192> cuckooKeys;
 inline std::array<Move, 8192> cuckooMoves;
-inline bool cuckooInitialized = false;
+inline std::atomic<bool> cuckooInitialized{false};
+inline std::mutex cuckooInitMutex;
 
 // Get piece attacks for Cuckoo initialization
 inline uint64_t get_cuckoo_piece_attacks(int piece_type, int sq, uint64_t occ) {
@@ -122,8 +125,17 @@ inline uint64_t get_cuckoo_piece_attacks(int piece_type, int sq, uint64_t occ) {
 }
 
 // Initialize Cuckoo tables at engine startup
+// CRITICAL FIX: Thread-safe initialization using double-checked locking pattern
+// This prevents race conditions when multiple threads try to initialize simultaneously
 inline void init_cuckoo() {
-  if (cuckooInitialized) return;
+  // Fast path: check if already initialized (atomic read, no lock needed)
+  if (cuckooInitialized.load(std::memory_order_acquire)) return;
+  
+  // Slow path: acquire lock and check again (double-checked locking)
+  std::lock_guard<std::mutex> lock(cuckooInitMutex);
+  
+  // Check again after acquiring lock (another thread might have initialized it)
+  if (cuckooInitialized.load(std::memory_order_relaxed)) return;
   
   cuckooKeys.fill(0);
   cuckooMoves.fill(MoveNone);
@@ -162,7 +174,8 @@ inline void init_cuckoo() {
     }
   }
   
-  cuckooInitialized = true;
+  // Mark as initialized (release semantics ensure all writes are visible)
+  cuckooInitialized.store(true, std::memory_order_release);
 }
 
 // ============================================================================
@@ -175,11 +188,21 @@ inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_inf
   int game_ply = thread_info.game_ply;
   int search_ply = thread_info.search_ply;
   
+  // CRITICAL FIX: Early return for initial position
+  // Need at least 3 halfmoves for any repetition to be possible
+  // game_ply starts at 6, so we need at least game_ply >= 8 (2 moves played) to check repetition
+  // But also check that we have enough history entries
   if (halfmoves < 3)
     return false;
   
-  // Ensure Cuckoo tables are initialized
-  if (!cuckooInitialized) {
+  // CRITICAL FIX: Ensure game_ply is within valid bounds for game_hist array access
+  // game_ply starts at 6, so we need at least 2 moves (game_ply >= 8) to have history
+  // Also ensure we don't access out-of-bounds (game_hist array size is GameSize)
+  if (game_ply < 8 || game_ply - 2 < 0 || game_ply >= GameSize)
+    return false;
+  
+  // Ensure Cuckoo tables are initialized (thread-safe)
+  if (!cuckooInitialized.load(std::memory_order_acquire)) {
     init_cuckoo();
   }
     
@@ -191,7 +214,14 @@ inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_inf
   int start_index = game_ply - 2;
   int end_index = std::max(game_ply - end, 0);
   
+  // CRITICAL FIX: Ensure indices are valid (game_hist array bounds)
+  // game_ply starts at 6, so valid indices are 0-5 initially
+  if (start_index < 0 || end_index < 0)
+    return false;
+  
   for (int i = start_index; i >= end_index; i -= 2) {
+    // CRITICAL FIX: Ensure index is within bounds before accessing game_hist
+    if (i < 0 || i >= GameSize) break;  // Safety check
     if (originalKey == thread_info.game_hist[i].position_key) {
       return true;
     }
@@ -199,10 +229,11 @@ inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_inf
   
   // Cuckoo-based detection for reversible moves
   // This detects if ANY legal reversing move would create a repetition
-  if (end >= 3) {
+  if (end >= 3 && game_ply >= 3) {
     uint64_t other = originalKey;
     
-    if (game_ply >= 1) {
+    // CRITICAL FIX: Ensure index is within bounds before accessing game_hist
+    if (game_ply >= 1 && (game_ply - 1) < GameSize) {
       other ^= thread_info.game_hist[game_ply - 1].position_key ^ zobrist_keys[side_index];
     }
     
@@ -210,7 +241,9 @@ inline bool upcoming_repetition(const Position &position, ThreadInfo &thread_inf
       int idx1 = game_ply - i;
       int idx2 = game_ply - i - 1;
       
-      if (idx1 < 0 || idx2 < 0) break;
+      // CRITICAL FIX: Ensure indices are valid before accessing game_hist
+      // Check both lower and upper bounds to prevent out-of-bounds access
+      if (idx1 < 0 || idx2 < 0 || idx1 >= GameSize || idx2 >= GameSize) break;
       
       other ^= thread_info.game_hist[idx1].position_key ^ 
                thread_info.game_hist[idx2].position_key ^ 
@@ -259,8 +292,18 @@ inline bool would_cause_repetition(const Position &pos, ThreadInfo &thread_info)
   int halfmoves = pos.halfmoves;
   int game_ply = thread_info.game_ply;
   
+  // CRITICAL FIX: Ensure we have enough game history to check
+  if (game_ply < 2 || halfmoves < 2)
+    return false;
+  
+  // CRITICAL FIX: Ensure game_ply is within valid bounds
+  if (game_ply >= GameSize)
+    return false;
+  
   int end_index = std::max(game_ply - halfmoves, 0);
   for (int i = game_ply - 2; i >= end_index; i -= 2) {
+    // CRITICAL FIX: Ensure index is within bounds before accessing game_hist
+    if (i < 0 || i >= GameSize) break;  // Safety check
     if (key == thread_info.game_hist[i].position_key) {
       return true;
     }
@@ -329,9 +372,15 @@ inline bool would_cause_repetition_after_move(const Position &position, Move mov
   // Check if this key appears in history
   int halfmoves = position.halfmoves + 1;  // Move will increment halfmoves
   int game_ply = thread_info.game_ply + 1;  // After move
-  int end_index = std::max(game_ply - halfmoves, 0);
   
+  // CRITICAL FIX: Ensure we have enough game history to check and bounds are valid
+  if (game_ply < 2 || halfmoves < 2 || game_ply >= GameSize)
+    return false;
+  
+  int end_index = std::max(game_ply - halfmoves, 0);
   for (int i = game_ply - 2; i >= end_index; i -= 2) {
+    // CRITICAL FIX: Ensure index is within bounds before accessing game_hist
+    if (i < 0 || i >= GameSize) break;  // Safety check
     if (key_after == thread_info.game_hist[i].position_key) {
       return true;
     }
@@ -592,31 +641,47 @@ inline int calculate_complexity_noise_uncached(Position &position) {
     complexity += 2;  // Both sides have queens
   }
   
-  // 2. Materyal Dengesizliği: Taş sayıları eşit değilse (Fil vs At gibi)
-  // Calculate non-pawn material for both sides
-  int white_non_pawn = (position.material_count[2] + position.material_count[3]) * 300 +  // Knights
-                        (position.material_count[4] + position.material_count[5]) * 300 +  // Bishops
-                        (position.material_count[6] + position.material_count[7]) * 500 +  // Rooks
-                        (position.material_count[8] + position.material_count[9]) * 900;  // Queens
-  int black_non_pawn = (position.material_count[2] + position.material_count[3]) * 300 +
-                        (position.material_count[4] + position.material_count[5]) * 300 +
-                        (position.material_count[6] + position.material_count[7]) * 500 +
-                        (position.material_count[8] + position.material_count[9]) * 900;
+  // 2. Açık Hatlar (Open Files): Taktiksel fırsatlar yaratır
+  uint64_t white_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::White];
+  uint64_t black_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::Black];
+  uint64_t all_pawns = white_pawns_bb | black_pawns_bb;
   
-  // Check for piece type imbalance (different piece types)
+  int open_files = 0;
+  for (int file = 0; file < 8; file++) {
+    if ((all_pawns & Files[file]) == 0) {
+      open_files++;  // Açık hat - her iki tarafta da piyon yok
+    }
+  }
+  if (open_files >= 2) {
+    complexity += 2;  // Çoklu açık hatlar
+  } else if (open_files == 1) {
+    complexity += 1;  // Tek açık hat
+  }
+  
+  // 3. Merkez Kontrolü: Merkezdeki taşlar pozisyonu daha karmaşık yapar
+  uint64_t center = (1ULL << e4) | (1ULL << e5) | (1ULL << d4) | (1ULL << d5);
+  uint64_t center_pieces = (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) & center;
+  int center_count = pop_count(center_pieces);
+  if (center_count >= 3) {
+    complexity += 1;  // Merkezde çok taş var
+  }
+  
+  // 4. Materyal Dengesizliği: Taş sayıları eşit değilse (Fil vs At gibi)
   int white_bishops = position.material_count[4];
   int black_bishops = position.material_count[5];
   int white_knights = position.material_count[2];
   int black_knights = position.material_count[3];
   
-  if (white_bishops != black_bishops || white_knights != black_knights) {
-    complexity += 2;  // Different minor piece types
+  // Sadece farklılık değil, büyük dengesizlik de önemli
+  int bishop_imbalance = abs(white_bishops - black_bishops);
+  int knight_imbalance = abs(white_knights - black_knights);
+  if (bishop_imbalance >= 2 || knight_imbalance >= 2) {
+    complexity += 2;  // Büyük dengesizlik
+  } else if (bishop_imbalance > 0 || knight_imbalance > 0) {
+    complexity += 1;  // Küçük dengesizlik
   }
   
-  // 3. Piyon Tansiyonu: Karşılıklı vuruşan piyonlar
-  uint64_t white_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::White];
-  uint64_t black_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::Black];
-  
+  // 5. Piyon Tansiyonu: Karşılıklı vuruşan piyonlar
   // Calculate pawn attacks
   uint64_t white_pawn_attacks = 0;
   uint64_t black_pawn_attacks = 0;
@@ -638,8 +703,8 @@ inline int calculate_complexity_noise_uncached(Position &position) {
     complexity += 1;  // Pawn tension detected
   }
   
-  // Base Complexity (Min 1, Max 5-6)
-  return std::max(1, std::min(complexity, 6));
+  // Base Complexity (Min 1, Max 8) - NNUE ile uyumlu aralık
+  return std::max(1, std::min(complexity, 8));
 }
 
 // Cached version - use this in production
@@ -668,6 +733,7 @@ inline int calculate_complexity_noise(Position &position, ThreadInfo &thread_inf
 
 // Overload for backward compatibility (without ThreadInfo)
 inline int calculate_complexity_noise(Position &position) {
+  if (!armageddonPsychology) return 1;  // Default complexity when disabled
   return calculate_complexity_noise_uncached(position);
 }
 
@@ -684,75 +750,122 @@ inline int calculate_complexity_noise(Position &position) {
 inline int estimate_sharpness_bitboard(const Position &position) {
   // Get opponent's color (them)
   int them = position.color ^ 1;
+  int us = position.color;
+  int sharpness = 0;
   
-  // 1. Payda: Piyon Olmayan Taş Sayısı (Non-Pawn Piece Count)
-  // Count all pieces except pawns for the opponent
+  // 1. Mobility Restriction (mevcut - iyi)
+  // Payda: Piyon Olmayan Taş Sayısı (Non-Pawn Piece Count)
   uint64_t their_pieces = position.colors_bb[them];
   uint64_t their_pawns = their_pieces & position.pieces_bb[PieceTypes::Pawn];
   uint64_t their_non_pawns = their_pieces & ~their_pawns;
   
   int piece_count = pop_count(their_non_pawns);
   
-  // Eğer hiç subay yoksa sharpness hesaplama (Endgame veya Pawn War)
-  if (piece_count <= 0) return 0;
-  
-  // 2. Pay: Hareket Alanı (Mobility Area) - Bitboard Operations Only
-  // Calculate all squares attacked by opponent's pieces (excluding pawns)
-  uint64_t all_attacks = 0;
-  uint64_t occ = position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
-  
-  // Knights
-  uint64_t knights = their_non_pawns & position.pieces_bb[PieceTypes::Knight];
-  while (knights) {
-    int sq = pop_lsb(knights);
-    all_attacks |= KnightAttacks[sq];
+  // Eğer hiç subay yoksa sadece king safety'ye bak (Endgame veya Pawn War)
+  if (piece_count > 0) {
+    // Pay: Hareket Alanı (Mobility Area) - Bitboard Operations Only
+    uint64_t all_attacks = 0;
+    uint64_t occ = position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
+    
+    // Knights
+    uint64_t knights = their_non_pawns & position.pieces_bb[PieceTypes::Knight];
+    while (knights) {
+      int sq = pop_lsb(knights);
+      all_attacks |= KnightAttacks[sq];
+    }
+    
+    // Bishops
+    uint64_t bishops = their_non_pawns & position.pieces_bb[PieceTypes::Bishop];
+    while (bishops) {
+      int sq = pop_lsb(bishops);
+      all_attacks |= get_bishop_attacks(sq, occ);
+    }
+    
+    // Rooks
+    uint64_t rooks = their_non_pawns & position.pieces_bb[PieceTypes::Rook];
+    while (rooks) {
+      int sq = pop_lsb(rooks);
+      all_attacks |= get_rook_attacks(sq, occ);
+    }
+    
+    // Queens (both bishop and rook attacks)
+    uint64_t queens = their_non_pawns & position.pieces_bb[PieceTypes::Queen];
+    while (queens) {
+      int sq = pop_lsb(queens);
+      all_attacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
+    }
+    
+    // Kings
+    uint64_t kings = their_non_pawns & position.pieces_bb[PieceTypes::King];
+    while (kings) {
+      int sq = pop_lsb(kings);
+      all_attacks |= KingAttacks[sq];
+    }
+    
+    // Remove squares occupied by opponent's own pieces (can't move there)
+    uint64_t safe_mobility = all_attacks & ~their_pieces;
+    
+    // Count mobility squares
+    int mobility_squares = pop_count(safe_mobility);
+    
+    // Hesaplama: Average Mobility Per Piece (AMP)
+    // AMP düştükçe sıkışıklık (Sharpness) artar
+    int amp = (mobility_squares > 0 && piece_count > 0) ? (mobility_squares / piece_count) : 0;
+    
+    // Mobility-based sharpness
+    if (amp <= 2) sharpness += 3;      // EXTREME: Taşlar kımıldayamıyor
+    else if (amp <= 4) sharpness += 2; // HIGH: Çok dar alan
+    else if (amp <= 6) sharpness += 1;  // MODERATE: Biraz baskı var
   }
   
-  // Bishops
-  uint64_t bishops = their_non_pawns & position.pieces_bb[PieceTypes::Bishop];
-  while (bishops) {
-    int sq = pop_lsb(bishops);
-    all_attacks |= get_bishop_attacks(sq, occ);
+  // 2. King Safety: Rakibin kralı ne kadar güvensiz?
+  int their_king_sq = get_king_pos(position, them);
+  if (their_king_sq != SqNone) {
+    uint64_t their_king_area = KingAttacks[their_king_sq] | (1ULL << their_king_sq);
+    
+    // Bizim taşlarımızın kral alanını tehdit eden saldırıları
+    uint64_t our_attacks_to_king = 0;
+    uint64_t our_pieces = position.colors_bb[us];
+    
+    // Knights attacking king area
+    uint64_t our_knights = our_pieces & position.pieces_bb[PieceTypes::Knight];
+    while (our_knights) {
+      int sq = pop_lsb(our_knights);
+      if (KnightAttacks[sq] & their_king_area) {
+        our_attacks_to_king |= (1ULL << sq);
+      }
+    }
+    
+    // Pawns attacking king area
+    uint64_t our_pawns = our_pieces & position.pieces_bb[PieceTypes::Pawn];
+    uint64_t our_pawn_attacks = 0;
+    uint64_t temp_pawns = our_pawns;
+    while (temp_pawns) {
+      int sq = pop_lsb(temp_pawns);
+      our_pawn_attacks |= PawnAttacks[us][sq];
+    }
+    if (our_pawn_attacks & their_king_area) {
+      sharpness += 1;  // Piyonlar kralı tehdit ediyor
+    }
+    
+    // Count pieces attacking king area
+    int attackers = pop_count(our_attacks_to_king);
+    if (attackers >= 2) {
+      sharpness += 1;  // Çoklu taşlar kralı tehdit ediyor
+    }
   }
   
-  // Rooks
-  uint64_t rooks = their_non_pawns & position.pieces_bb[PieceTypes::Rook];
-  while (rooks) {
-    int sq = pop_lsb(rooks);
-    all_attacks |= get_rook_attacks(sq, occ);
+  // 3. Weak Pawns: Zayıf piyonlar pozisyonu keskinleştirir (basitleştirilmiş)
+  // Backward/isolated pawns kontrolü pahalı olabilir, bu yüzden sadece
+  // piyon sayısı dengesizliğine bakıyoruz
+  int white_pawn_count = pop_count(position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::White]);
+  int black_pawn_count = pop_count(position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::Black]);
+  int pawn_imbalance = abs(white_pawn_count - black_pawn_count);
+  if (pawn_imbalance >= 2) {
+    sharpness += 1;  // Büyük piyon dengesizliği
   }
   
-  // Queens (both bishop and rook attacks)
-  uint64_t queens = their_non_pawns & position.pieces_bb[PieceTypes::Queen];
-  while (queens) {
-    int sq = pop_lsb(queens);
-    all_attacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
-  }
-  
-  // Kings
-  uint64_t kings = their_non_pawns & position.pieces_bb[PieceTypes::King];
-  while (kings) {
-    int sq = pop_lsb(kings);
-    all_attacks |= KingAttacks[sq];
-  }
-  
-  // Remove squares occupied by opponent's own pieces (can't move there)
-  uint64_t safe_mobility = all_attacks & ~their_pieces;
-  
-  // Count mobility squares
-  int mobility_squares = pop_count(safe_mobility);
-  
-  // 3. Hesaplama: Average Mobility Per Piece (AMP)
-  // AMP düştükçe sıkışıklık (Sharpness) artar
-  int amp = (mobility_squares > 0 && piece_count > 0) ? (mobility_squares / piece_count) : 0;
-  
-  // 4. Eşik Değerler (Bitboard Overlap dikkate alınarak)
-  // AMP düştükçe sıkışıklık (Sharpness) artar
-  if (amp <= 2) return 4;      // EXTREME: Taşlar kımıldayamıyor veya hepsi aynı yere bakıyor
-  else if (amp <= 4) return 2; // HIGH: Çok dar alan
-  else if (amp <= 6) return 1;  // MODERATE: Biraz baskı var
-  
-  return 0;  // LOW: Rakip rahat (AMP > 6)
+  return std::min(sharpness, 5);  // Max 5 (NNUE ile uyumlu)
 }
 
 // ============================================================================
@@ -812,8 +925,33 @@ inline int calculate_pressure_bonus(Position &position, ThreadInfo &thread_info)
   int sharpness = calculate_sharpness_level(position, thread_info);
   int complexity = calculate_complexity_noise(position, thread_info);
   
-  // Pressure bonus = sharpness * complexity * 8 cp
-  int pressure_bonus = (sharpness * complexity) * 8;
+  // Base pressure calculation
+  int base_pressure = sharpness * complexity;
+  
+  // NNUE-compatible scaling: Daha sofistike ama makul aralıkta
+  // Eski: sharpness * complexity * 8 (max: 4*6*8 = 192 cp - çok yüksek!)
+  // Yeni: Daha dengeli scaling
+  
+  int pressure_bonus = base_pressure * 4;  // Base multiplier (daha konservatif)
+  
+  // Exponential bonus for very high pressure (ama sınırlı)
+  if (base_pressure > 15) {
+    pressure_bonus += 20;  // High pressure bonus (küçük ekstra)
+  }
+  if (base_pressure > 20) {
+    pressure_bonus += 15;  // Extreme pressure bonus
+  }
+  
+  // Game phase adjustment: Endgame'de daha az önemli
+  // NNUE zaten endgame'i iyi değerlendiriyor, bu yüzden psychology bonusunu azalt
+  if (thread_info.phase == PhaseTypes::Endgame) {
+    pressure_bonus = pressure_bonus * 3 / 4;  // %25 azalt
+  }
+  
+  // Cap the bonus to prevent it from overwhelming NNUE evaluation
+  // NNUE genellikle -1000 ile +1000 cp arasında değerler üretir
+  // Bu yüzden bonus maksimum 120 cp olmalı (NNUE'nun %12'si)
+  pressure_bonus = std::min(pressure_bonus, 120);
   
   // Cache Yaz
   thread_info.armaCache.pressure_bonus = pressure_bonus;
@@ -825,7 +963,15 @@ inline int calculate_pressure_bonus(Position &position) {
   if (!armageddonPsychology) return 0;
   int sharpness = calculate_sharpness_level(position);
   int complexity = calculate_complexity_noise(position);
-  return (sharpness * complexity) * 8;
+  
+  // Use same improved scaling as cached version (but without phase adjustment)
+  int base_pressure = sharpness * complexity;
+  int pressure_bonus = base_pressure * 4;
+  
+  if (base_pressure > 15) pressure_bonus += 20;
+  if (base_pressure > 20) pressure_bonus += 15;
+  
+  return std::min(pressure_bonus, 120);
 }
 
 // ============================================================================
@@ -939,16 +1085,18 @@ inline int calculate_tactical_volatility_uncached(Position &position) {
     }
   }
   
-  volatility += (hanging_white + hanging_black) * 10;
+  volatility += (hanging_white + hanging_black) * 8;  // Reduced from 10 (NNUE compatibility)
   
   // 2. King Exposure (Şah Açıklığı) - King attacks
   int white_king_pos = get_king_pos(position, Colors::White);
   int black_king_pos = get_king_pos(position, Colors::Black);
   
-  int white_king_attacks = pop_count(attacks_square(position, white_king_pos, Colors::Black));
-  int black_king_attacks = pop_count(attacks_square(position, black_king_pos, Colors::White));
-  
-  volatility += (white_king_attacks + black_king_attacks) * 5;
+  if (white_king_pos != SqNone && black_king_pos != SqNone) {
+    int white_king_attacks = pop_count(attacks_square(position, white_king_pos, Colors::Black));
+    int black_king_attacks = pop_count(attacks_square(position, black_king_pos, Colors::White));
+    
+    volatility += (white_king_attacks + black_king_attacks) * 4;  // Reduced from 5
+  }
   
   // 3. Passed Pawns (Geçer Piyonlar) - Simplified check
   // Count pawns that are advanced and not blocked
@@ -956,11 +1104,16 @@ inline int calculate_tactical_volatility_uncached(Position &position) {
   int black_pawns = position.material_count[1];
   
   // Asymmetry in passed pawns increases volatility
-  if (abs(white_pawns - black_pawns) > 0) {
-    volatility += 15;
+  int pawn_diff = abs(white_pawns - black_pawns);
+  if (pawn_diff >= 2) {
+    volatility += 12;  // Reduced from 15, only for significant imbalance
+  } else if (pawn_diff > 0) {
+    volatility += 6;   // Small imbalance
   }
   
-  return volatility;
+  // Cap volatility to prevent it from overwhelming NNUE evaluation
+  // Max volatility should be around 80-100 cp (NNUE'nun %8-10'u)
+  return std::min(volatility, 100);
 }
 
 // Cached version - use this in production
@@ -1062,30 +1215,34 @@ int eval(Position &position, ThreadInfo &thread_info) {
   // ARMAGEDDON PSYCHOLOGY: Pressure Index & Complexity Bias (CACHED) - OPTIMIZED
   // ============================================================================
   // This block handles "psychological" bonuses (complexity/sharpness) - separate from base Armageddon penalties
+  // NNUE-compatible: Bonuslar makul aralıkta tutulur (max ~150 cp total)
   if (armageddonPsychology) {
     int currentScore = eval + bonus1 + bonus2;  // Calculate once
     
     // Only apply psychology bonuses if game is not completely lost/won (within reasonable range)
     if (abs(currentScore) < 400) {
-      // ADIM 3: The Pressure Score - Sharpness * Complexity * 8 (CACHED)
+      // ADIM 3: The Pressure Score - Sharpness * Complexity (CACHED, improved scaling)
       // This combines both sharpness (opponent's safe moves) and complexity (position noise)
       int pressure_bonus = calculate_pressure_bonus(position, thread_info);
       eval += pressure_bonus;
       
       // KATMAN 3: Tactical Volatility Index - Bonus for chaotic positions when losing/drawing (CACHED)
-      // Apply when score is very low (losing or near draw)
-      if (currentScore <= 10) {
+      // Genişletilmiş kullanım: Sadece currentScore <= 10 değil, <= 50'ye kadar
+      if (currentScore <= 50) {
         int volatility = calculate_tactical_volatility(position, thread_info);
-        eval += volatility;
+        
+        // Volatility'yi score'a göre scale et
+        // Kaybeden durumlarda daha fazla, beraberlik yakın durumlarda daha az
+        if (currentScore <= 10) {
+          eval += volatility;  // Full volatility (kaybeden durumlar)
+        } else {
+          eval += volatility / 2;  // Half volatility (beraberlik yakın durumlar)
+        }
       }
       
-      // Additional complexity bonus when losing (currentScore < 50)
-      // Note: calculate_complexity() already calls calculate_pressure_bonus(), 
-      // but we keep this for backward compatibility and additional boost when losing
-      if (currentScore < 50) {
-        int complexityScore = calculate_complexity(position, thread_info);
-        eval += complexityScore;
-      }
+      // REMOVED: calculate_complexity() çağrısı kaldırıldı
+      // Çünkü zaten calculate_pressure_bonus() içinde complexity kullanılıyor
+      // Duplicate bonus NNUE evaluation'ı bozuyordu
     }
   }
 
@@ -2693,12 +2850,27 @@ void iterative_deepen(
       // Aspiration Windows: We search the position with a narrow window around
       // the last search score in order to get cutoffs faster. If our search
       // lands outside the bounds, expand them and try again.
+      // CRITICAL FIX: Add iteration limit to prevent infinite loops (especially in Armageddon mode)
 
-      while (score <= alpha || score >= beta || thread_data.stop ||
-             thread_info.datagen_stop) {
+      int asp_iterations = 0;
+      const int max_asp_iterations = 50;  // Prevent infinite loops
+
+      while ((score <= alpha || score >= beta || thread_data.stop ||
+             thread_info.datagen_stop) && asp_iterations < max_asp_iterations) {
+
+        asp_iterations++;
 
         if (thread_data.stop || thread_info.datagen_stop) {
           goto finish;
+        }
+        
+        // CRITICAL FIX: If we've expanded the window too much, reset to full window
+        // This prevents infinite loops when Armageddon mode returns extreme scores
+        if (asp_iterations > 20) {
+          alpha = ScoreNone;
+          beta = -ScoreNone;
+          temp_depth = depth;
+          delta = AspStartWindow;
         }
 
         if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
