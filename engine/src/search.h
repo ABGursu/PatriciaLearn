@@ -19,31 +19,56 @@ constexpr int NormalizationFactor = 195;
 
 // Global UCI option variables
 inline bool fortressDetectionEnabled = false;  // UCI: Fortress Detection
-inline bool armageddonMode = false;            // UCI: Armageddon
+inline bool armageddonMode = false;            // UCI: Armageddon (Base: Anti-Draw penalties)
+inline bool armageddonPsychology = false;     // UCI: Armageddon Psychology (Complexity/Sharpness bonuses)
 inline bool armageddonTbPenalty = false;       // UCI: Armageddon TB Penalty (penalize even TB draws)
 
 // Setters for UCI options
 inline void set_fortress_detection(bool enabled) { fortressDetectionEnabled = enabled; }
 inline void set_armageddon_mode(bool enabled) { armageddonMode = enabled; }
+inline void set_armageddon_psychology(bool enabled) { armageddonPsychology = enabled; }
 inline void set_armageddon_tb_penalty(bool enabled) { armageddonTbPenalty = enabled; }
 
 // Getters for UCI options
 inline bool get_fortress_detection() { return fortressDetectionEnabled; }
 inline bool get_armageddon_mode() { return armageddonMode; }
+inline bool get_armageddon_psychology() { return armageddonPsychology; }
 inline bool get_armageddon_tb_penalty() { return armageddonTbPenalty; }
 
 // Armageddon draw penalty constant
 constexpr int ArmageddonPenalty = ScoreMate / 2;
+
+// ============================================================================
+// MECHANISM 1: Dynamic Contempt - Scale penalty based on game phase
+// ============================================================================
+// Calculate phase-based penalty scaling (Endgame = less penalty)
+inline int get_armageddon_penalty_scaled(int phase) {
+  if (!armageddonMode) return ArmageddonPenalty;
+  
+  // Phase: 0=Middlegame (full penalty), 1=Endgame (reduced), 2=Sacrifice (full)
+  // Scale: Middlegame=100%, Endgame=40%, Sacrifice=100%
+  int scale;
+  if (phase == PhaseTypes::Endgame) {
+    scale = 40;  // Endgame: 40% penalty (6400 instead of 16000)
+  } else {
+    scale = 100;  // Middlegame/Sacrifice: full penalty
+  }
+  
+  return (ArmageddonPenalty * scale) / 100;
+}
 
 // Draw value with Armageddon penalty (perspective-aware)
 // In Armageddon mode, draws are bad for US (root side), good for opponent
 // At even ply (our turn): return negative (bad for us)
 // At odd ply (opponent's turn): return positive (good for them, which negates to bad for us at parent)
 // tb_draw: if true, no penalty applied (unless armageddonTbPenalty is enabled)
-inline int get_draw_value_armageddon(int ply, bool tb_draw = false) {
+// phase: game phase for dynamic contempt (optional, defaults to Middlegame)
+inline int get_draw_value_armageddon(int ply, bool tb_draw = false, int phase = PhaseTypes::Middlegame) {
   if (armageddonMode && (!tb_draw || armageddonTbPenalty)) {
+    // MECHANISM 1: Dynamic Contempt - scale penalty by phase
+    int penalty = get_armageddon_penalty_scaled(phase);
     // Even ply = our turn (root side), odd ply = opponent's turn
-    return (ply % 2 == 0) ? -ArmageddonPenalty : ArmageddonPenalty;
+    return (ply % 2 == 0) ? -penalty : penalty;
   }
   return 0;  // Normal draw value
 }
@@ -60,12 +85,12 @@ inline int armageddon_rule50_scale(int halfmoves) {
 }
 
 // Apply rule50 scaling to evaluation (Armageddon only)
-inline int apply_armageddon_rule50_scaling(int eval, int halfmoves, int ply) {
+inline int apply_armageddon_rule50_scaling(int eval, int halfmoves, int ply, int phase) {
   if (!armageddonMode || halfmoves < 60) return eval;
   int scale = armageddon_rule50_scale(halfmoves);
   if (scale >= 100) return eval;
   // Blend evaluation toward draw penalty
-  int draw_penalty = get_draw_value_armageddon(ply, false);
+  int draw_penalty = get_draw_value_armageddon(ply, false, phase);
   return (eval * scale + draw_penalty * (100 - scale)) / 100;
 }
 
@@ -244,10 +269,83 @@ inline bool would_cause_repetition(const Position &pos, ThreadInfo &thread_info)
 }
 
 // ============================================================================
+// OPTIMIZATION: Calculate zobrist key after a move without making the move
+// ============================================================================
+// This is a simplified version that handles most cases (normal moves, captures)
+// For complex moves (castling, en passant, promotion), we fall back to make_move
+// Returns true in *success if key was calculated, false if we need make_move fallback
+inline uint64_t key_after_move(const Position &position, Move move, bool *success) {
+  *success = true;
+  
+  if (move == MoveNone) {
+    return position.zobrist_key ^ zobrist_keys[side_index];
+  }
+  
+  uint64_t key = position.zobrist_key;
+  int from = extract_from(move);
+  int to = extract_to(move);
+  int from_piece = position.board[from];
+  int to_piece = position.board[to];
+  int move_type = extract_type(move);
+  
+  // Handle special move types (castling, en passant, promotion) - fall back to make_move
+  if (move_type == MoveTypes::Castling || 
+      move_type == MoveTypes::EnPassant ||
+      move_type == MoveTypes::Promotion) {
+    *success = false;  // Need to use make_move for complex moves
+    return 0;
+  }
+  
+  // Normal move: update key for piece moving
+  key ^= zobrist_keys[get_zobrist_key(from_piece, from)];
+  key ^= zobrist_keys[get_zobrist_key(from_piece, to)];
+  
+  // If capture, remove captured piece
+  if (to_piece != Pieces::Blank) {
+    key ^= zobrist_keys[get_zobrist_key(to_piece, to)];
+  }
+  
+  // Flip side to move
+  key ^= zobrist_keys[side_index];
+  
+  return key;
+}
+
+// OPTIMIZED: Check if move would cause repetition using key_after (avoids position copy)
+inline bool would_cause_repetition_after_move(const Position &position, Move move, ThreadInfo &thread_info) {
+  bool key_calculated;
+  uint64_t key_after = key_after_move(position, move, &key_calculated);
+  
+  // If key calculation failed (complex move), fall back to make_move
+  if (!key_calculated) {
+    // Fallback: use make_move (but this is rare for most moves)
+    Position temp = position;
+    make_move(temp, move);
+    bool result = would_cause_repetition(temp, thread_info);
+    // Note: We can't undo_move, but this is only for complex moves (rare)
+    return result;
+  }
+  
+  // Check if this key appears in history
+  int halfmoves = position.halfmoves + 1;  // Move will increment halfmoves
+  int game_ply = thread_info.game_ply + 1;  // After move
+  int end_index = std::max(game_ply - halfmoves, 0);
+  
+  for (int i = game_ply - 2; i >= end_index; i -= 2) {
+    if (key_after == thread_info.game_hist[i].position_key) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// ============================================================================
 // KING DANGER DETECTION (Crystal port - Fortress Detection helper)
 // ============================================================================
 // Checks if the king is in a dangerous position (few legal squares, many attackers)
 // This helps detect "fortress" positions where draws are likely
+// IMPROVEMENT 4: Enhanced detection with attacker position analysis
 inline bool king_danger(const Position &position, int color) {
   if (!fortressDetectionEnabled)
     return false;
@@ -259,6 +357,7 @@ inline bool king_danger(const Position &position, int color) {
   
   // Get king ring (squares around the king)
   uint64_t king_ring = KingAttacks[ksq];
+  uint64_t original_king_ring = king_ring;
   
   int king_attackers_count = 0;
   int legal_king_count = 0;
@@ -266,22 +365,31 @@ inline bool king_danger(const Position &position, int color) {
   while (king_ring) {
     int to = pop_lsb(king_ring);
     
-    // Check if this square is attacked by enemy
-    bool enemy_attacks = attacks_square(position, to, enemy);
+    // Get all enemy attackers to this square (as bitboard)
+    uint64_t enemy_attackers = attacks_square(position, to, enemy);
     
-    if (!enemy_attacks) {
-      // Check if the square is free (not occupied by own piece)
+    if (!enemy_attackers) {
+      // Square is safe, check if we can move there
       if (!(own_pieces & (1ULL << to))) {
         legal_king_count++;
       }
     } else {
-      king_attackers_count++;
+      // Count attackers that are OUTSIDE king ring OR multiple attackers
+      uint64_t temp_attackers = enemy_attackers;
+      while (temp_attackers) {
+        int attacker_sq = pop_lsb(temp_attackers);
+        bool outside_ring = !(original_king_ring & (1ULL << attacker_sq));
+        // Check if there are multiple attackers (more than just this one)
+        bool multiple_attackers = (enemy_attackers & ~(1ULL << attacker_sq)) != 0;
+        
+        if (outside_ring || multiple_attackers) {
+          king_attackers_count++;
+        }
+      }
     }
   }
   
-  // King is in danger if:
-  // - Multiple attackers and few legal squares
-  // - Or any attacker and no legal squares
+  // King is in danger if restricted AND under attack
   return (king_attackers_count > 1 && legal_king_count < 2) ||
          (king_attackers_count > 0 && legal_king_count == 0);
 }
@@ -380,6 +488,425 @@ int16_t total_mat_color(const Position &position, int color) {
   return m;
 }
 
+// ============================================================================
+// HIGH STAKES, HIGH NOISE: Pressure Index (Armageddon Mode Only)
+// ============================================================================
+
+// ============================================================================
+// ADIM 1: Complexity Faktörü (The Noise) - Returns 1-6 - CACHED VERSION
+// ============================================================================
+// Calculate position complexity (noise level) - normalized to 1-6 scale
+inline int calculate_complexity_noise_uncached(Position &position) {
+  if (!armageddonPsychology) return 1;
+  
+  int complexity = 0;
+  
+  // 1. Vezir Faktörü: Vezirler tahtada ise kaos artar
+  int white_queens = position.material_count[8];  // WQueen
+  int black_queens = position.material_count[9];  // BQueen
+  if (white_queens > 0 && black_queens > 0) {
+    complexity += 2;  // Both sides have queens
+  }
+  
+  // 2. Materyal Dengesizliği: Taş sayıları eşit değilse (Fil vs At gibi)
+  // Calculate non-pawn material for both sides
+  int white_non_pawn = (position.material_count[2] + position.material_count[3]) * 300 +  // Knights
+                        (position.material_count[4] + position.material_count[5]) * 300 +  // Bishops
+                        (position.material_count[6] + position.material_count[7]) * 500 +  // Rooks
+                        (position.material_count[8] + position.material_count[9]) * 900;  // Queens
+  int black_non_pawn = (position.material_count[2] + position.material_count[3]) * 300 +
+                        (position.material_count[4] + position.material_count[5]) * 300 +
+                        (position.material_count[6] + position.material_count[7]) * 500 +
+                        (position.material_count[8] + position.material_count[9]) * 900;
+  
+  // Check for piece type imbalance (different piece types)
+  int white_bishops = position.material_count[4];
+  int black_bishops = position.material_count[5];
+  int white_knights = position.material_count[2];
+  int black_knights = position.material_count[3];
+  
+  if (white_bishops != black_bishops || white_knights != black_knights) {
+    complexity += 2;  // Different minor piece types
+  }
+  
+  // 3. Piyon Tansiyonu: Karşılıklı vuruşan piyonlar
+  uint64_t white_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::White];
+  uint64_t black_pawns_bb = position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::Black];
+  
+  // Calculate pawn attacks
+  uint64_t white_pawn_attacks = 0;
+  uint64_t black_pawn_attacks = 0;
+  
+  uint64_t temp_white = white_pawns_bb;
+  while (temp_white) {
+    int sq = pop_lsb(temp_white);
+    white_pawn_attacks |= PawnAttacks[Colors::White][sq];
+  }
+  
+  uint64_t temp_black = black_pawns_bb;
+  while (temp_black) {
+    int sq = pop_lsb(temp_black);
+    black_pawn_attacks |= PawnAttacks[Colors::Black][sq];
+  }
+  
+  // Check if pawns attack each other (tension)
+  if ((white_pawn_attacks & black_pawns_bb) || (black_pawn_attacks & white_pawns_bb)) {
+    complexity += 1;  // Pawn tension detected
+  }
+  
+  // Base Complexity (Min 1, Max 5-6)
+  return std::max(1, std::min(complexity, 6));
+}
+
+// Cached version - use this in production
+inline int calculate_complexity_noise(Position &position, ThreadInfo &thread_info) {
+  if (!armageddonPsychology) return 1;
+  
+  // Cache Kontrolü
+  if (thread_info.armaCache.key == position.zobrist_key) {
+    if (thread_info.armaCache.complexity != -1) {
+      return thread_info.armaCache.complexity;
+    }
+  } else {
+    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
+    thread_info.armaCache.clear();
+    thread_info.armaCache.key = position.zobrist_key;
+  }
+  
+  // Ağır Hesaplama (Sadece buraya düşerse yapılır)
+  int complexity = calculate_complexity_noise_uncached(position);
+  
+  // Cache Yaz
+  thread_info.armaCache.complexity = complexity;
+  return complexity;
+}
+
+// Overload for backward compatibility (without ThreadInfo)
+inline int calculate_complexity_noise(Position &position) {
+  return calculate_complexity_noise_uncached(position);
+}
+
+// ============================================================================
+// PERFORMANCE OPTIMIZATION: Bitboard-based Sharpness Estimation
+// ============================================================================
+// Replaces expensive count_opponent_safe_moves() with fast bitboard operations
+// Calculates "Normalized Pseudo-Mobility" (AMP: Average Mobility Per Piece)
+// to estimate how "sharp" (restricted) the opponent's position is.
+// ============================================================================
+// Returns sharpness level: 0 (LOW) to 4 (EXTREME)
+// Uses only bitboard operations - NO move generation, NO SEE calculations
+inline int estimate_sharpness_bitboard(const Position &position) {
+  if (!armageddonPsychology) return 0;
+  
+  // Get opponent's color (them)
+  int them = position.color ^ 1;
+  
+  // 1. Payda: Piyon Olmayan Taş Sayısı (Non-Pawn Piece Count)
+  // Count all pieces except pawns for the opponent
+  uint64_t their_pieces = position.colors_bb[them];
+  uint64_t their_pawns = their_pieces & position.pieces_bb[PieceTypes::Pawn];
+  uint64_t their_non_pawns = their_pieces & ~their_pawns;
+  
+  int piece_count = pop_count(their_non_pawns);
+  
+  // Eğer hiç subay yoksa sharpness hesaplama (Endgame veya Pawn War)
+  if (piece_count <= 0) return 0;
+  
+  // 2. Pay: Hareket Alanı (Mobility Area) - Bitboard Operations Only
+  // Calculate all squares attacked by opponent's pieces (excluding pawns)
+  uint64_t all_attacks = 0;
+  uint64_t occ = position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
+  
+  // Knights
+  uint64_t knights = their_non_pawns & position.pieces_bb[PieceTypes::Knight];
+  while (knights) {
+    int sq = pop_lsb(knights);
+    all_attacks |= KnightAttacks[sq];
+  }
+  
+  // Bishops
+  uint64_t bishops = their_non_pawns & position.pieces_bb[PieceTypes::Bishop];
+  while (bishops) {
+    int sq = pop_lsb(bishops);
+    all_attacks |= get_bishop_attacks(sq, occ);
+  }
+  
+  // Rooks
+  uint64_t rooks = their_non_pawns & position.pieces_bb[PieceTypes::Rook];
+  while (rooks) {
+    int sq = pop_lsb(rooks);
+    all_attacks |= get_rook_attacks(sq, occ);
+  }
+  
+  // Queens (both bishop and rook attacks)
+  uint64_t queens = their_non_pawns & position.pieces_bb[PieceTypes::Queen];
+  while (queens) {
+    int sq = pop_lsb(queens);
+    all_attacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
+  }
+  
+  // Kings
+  uint64_t kings = their_non_pawns & position.pieces_bb[PieceTypes::King];
+  while (kings) {
+    int sq = pop_lsb(kings);
+    all_attacks |= KingAttacks[sq];
+  }
+  
+  // Remove squares occupied by opponent's own pieces (can't move there)
+  uint64_t safe_mobility = all_attacks & ~their_pieces;
+  
+  // Count mobility squares
+  int mobility_squares = pop_count(safe_mobility);
+  
+  // 3. Hesaplama: Average Mobility Per Piece (AMP)
+  // AMP düştükçe sıkışıklık (Sharpness) artar
+  int amp = (mobility_squares > 0 && piece_count > 0) ? (mobility_squares / piece_count) : 0;
+  
+  // 4. Eşik Değerler (Bitboard Overlap dikkate alınarak)
+  // AMP düştükçe sıkışıklık (Sharpness) artar
+  if (amp <= 2) return 4;      // EXTREME: Taşlar kımıldayamıyor veya hepsi aynı yere bakıyor
+  else if (amp <= 4) return 2; // HIGH: Çok dar alan
+  else if (amp <= 6) return 1;  // MODERATE: Biraz baskı var
+  
+  return 0;  // LOW: Rakip rahat (AMP > 6)
+}
+
+// ============================================================================
+// ADIM 2: Sharpness Faktörü (The Blade) - Returns 0-4 - CACHED VERSION
+// ============================================================================
+// Calculate how "sharp" the position is using fast bitboard estimation
+// OPTIMIZED: Uses estimate_sharpness_bitboard() instead of expensive move generation
+inline int calculate_sharpness_level(Position &position, ThreadInfo &thread_info) {
+  if (!armageddonPsychology) return 0;
+  
+  // Cache Kontrolü
+  if (thread_info.armaCache.key == position.zobrist_key) {
+    if (thread_info.armaCache.sharpness != -1) {
+      return thread_info.armaCache.sharpness;
+    }
+  } else {
+    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
+    thread_info.armaCache.clear();
+    thread_info.armaCache.key = position.zobrist_key;
+  }
+  
+  // Fast bitboard-based calculation (NO move generation, NO SEE)
+  int sharpness = estimate_sharpness_bitboard(position);
+  
+  // Cache Yaz
+  thread_info.armaCache.sharpness = sharpness;
+  return sharpness;
+}
+
+// Overload for backward compatibility
+inline int calculate_sharpness_level(Position &position) {
+  if (!armageddonPsychology) return 0;
+  return estimate_sharpness_bitboard(position);
+}
+
+// ============================================================================
+// ADIM 3: The Pressure Score (Büyük Birleşme) - CACHED VERSION
+// ============================================================================
+// Calculate pressure bonus: Sharpness * Complexity * Multiplier
+inline int calculate_pressure_bonus(Position &position, ThreadInfo &thread_info) {
+  if (!armageddonPsychology) return 0;
+  
+  // Cache Kontrolü
+  if (thread_info.armaCache.key == position.zobrist_key) {
+    if (thread_info.armaCache.pressure_bonus != -1) {
+      return thread_info.armaCache.pressure_bonus;
+    }
+  } else {
+    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
+    thread_info.armaCache.clear();
+    thread_info.armaCache.key = position.zobrist_key;
+  }
+  
+  // Formül: Baskı = Keskinlik * Karmaşıklık (both cached)
+  int sharpness = calculate_sharpness_level(position, thread_info);
+  int complexity = calculate_complexity_noise(position, thread_info);
+  
+  // Pressure bonus = sharpness * complexity * 8 cp
+  int pressure_bonus = (sharpness * complexity) * 8;
+  
+  // Cache Yaz
+  thread_info.armaCache.pressure_bonus = pressure_bonus;
+  return pressure_bonus;
+}
+
+// Overload for backward compatibility
+inline int calculate_pressure_bonus(Position &position) {
+  if (!armageddonPsychology) return 0;
+  int sharpness = calculate_sharpness_level(position);
+  int complexity = calculate_complexity_noise(position);
+  return (sharpness * complexity) * 8;
+}
+
+// ============================================================================
+// MECHANISM 3: Advanced Complexity Bias (The "Chaos" Index) - DEPRECATED
+// ============================================================================
+// This is kept for backward compatibility but replaced by calculate_pressure_bonus
+inline int calculate_complexity(const Position &position, ThreadInfo &thread_info) {
+  if (!armageddonPsychology) return 0;
+  
+  // Use new pressure system instead (cached)
+  Position &pos = const_cast<Position&>(position);
+  return calculate_pressure_bonus(pos, thread_info);
+}
+
+// ============================================================================
+// THE RAZOR'S EDGE: Sharpness Heuristic (Armageddon Mode Only)
+// ============================================================================
+
+
+// Calculate sharpness bonus based on opponent's safe move count
+// DEPRECATED: Use calculate_pressure_bonus instead (which combines sharpness + complexity)
+// Note: This version doesn't have ThreadInfo, so it uses uncached version
+inline int calculate_sharpness_bonus(Position &position) {
+  if (!armageddonMode) return 0;
+  
+  // Use new pressure system instead (uncached - for backward compatibility)
+  return calculate_pressure_bonus(position);
+}
+
+// ============================================================================
+// KATMAN 2: Singularity Exploitation - Detect when opponent is in singular position
+// ============================================================================
+// This is handled in search() by checking if we're in a singular search
+// and if the opponent's best move is much better than alternatives
+// We'll add a bonus to the parent move when we detect singularity
+
+// Track if current position is singular (for parent bonus)
+inline bool is_singular_position(int best_score, int second_best_score, int depth) {
+  if (!armageddonMode) return false;
+  
+  // If best move is significantly better than second best, it's singular
+  // Threshold: best should be at least (depth * 2) centipawns better
+  int threshold = depth * 2;
+  return (best_score - second_best_score) >= threshold;
+}
+
+// ============================================================================
+// KATMAN 3: Tactical Volatility Index - Measure position chaos - CACHED VERSION
+// ============================================================================
+// Calculate volatility based on hanging pieces, king exposure, passed pawns
+// OPTIMIZED: Only check major/minor pieces (skip pawns) to reduce computation
+inline int calculate_tactical_volatility_uncached(Position &position) {
+  if (!armageddonPsychology) return 0;
+  
+  int volatility = 0;
+  
+  // 1. Hanging Pieces (Boştaki Taşlar) - OPTIMIZED: Only check major/minor pieces
+  // Skip pawns as they're less critical and checking all pieces is expensive
+  uint64_t white_majors = (position.pieces_bb[PieceTypes::Rook] | position.pieces_bb[PieceTypes::Queen]) & position.colors_bb[Colors::White];
+  uint64_t white_minors = (position.pieces_bb[PieceTypes::Knight] | position.pieces_bb[PieceTypes::Bishop]) & position.colors_bb[Colors::White];
+  uint64_t black_majors = (position.pieces_bb[PieceTypes::Rook] | position.pieces_bb[PieceTypes::Queen]) & position.colors_bb[Colors::Black];
+  uint64_t black_minors = (position.pieces_bb[PieceTypes::Knight] | position.pieces_bb[PieceTypes::Bishop]) & position.colors_bb[Colors::Black];
+  
+  int hanging_white = 0;
+  int hanging_black = 0;
+  
+  // Check white major pieces (Rooks, Queens)
+  uint64_t pieces_to_check = white_majors;
+  while (pieces_to_check) {
+    int sq = pop_lsb(pieces_to_check);
+    uint64_t attackers = attacks_square(position, sq, Colors::Black);
+    uint64_t defenders = attacks_square(position, sq, Colors::White);
+    
+    if (pop_count(attackers) > pop_count(defenders)) {
+      hanging_white++;
+    }
+  }
+  
+  // Check white minor pieces (Knights, Bishops)
+  pieces_to_check = white_minors;
+  while (pieces_to_check) {
+    int sq = pop_lsb(pieces_to_check);
+    uint64_t attackers = attacks_square(position, sq, Colors::Black);
+    uint64_t defenders = attacks_square(position, sq, Colors::White);
+    
+    if (pop_count(attackers) > pop_count(defenders)) {
+      hanging_white++;
+    }
+  }
+  
+  // Check black major pieces
+  pieces_to_check = black_majors;
+  while (pieces_to_check) {
+    int sq = pop_lsb(pieces_to_check);
+    uint64_t attackers = attacks_square(position, sq, Colors::White);
+    uint64_t defenders = attacks_square(position, sq, Colors::Black);
+    
+    if (pop_count(attackers) > pop_count(defenders)) {
+      hanging_black++;
+    }
+  }
+  
+  // Check black minor pieces
+  pieces_to_check = black_minors;
+  while (pieces_to_check) {
+    int sq = pop_lsb(pieces_to_check);
+    uint64_t attackers = attacks_square(position, sq, Colors::White);
+    uint64_t defenders = attacks_square(position, sq, Colors::Black);
+    
+    if (pop_count(attackers) > pop_count(defenders)) {
+      hanging_black++;
+    }
+  }
+  
+  volatility += (hanging_white + hanging_black) * 10;
+  
+  // 2. King Exposure (Şah Açıklığı) - King attacks
+  int white_king_pos = get_king_pos(position, Colors::White);
+  int black_king_pos = get_king_pos(position, Colors::Black);
+  
+  int white_king_attacks = pop_count(attacks_square(position, white_king_pos, Colors::Black));
+  int black_king_attacks = pop_count(attacks_square(position, black_king_pos, Colors::White));
+  
+  volatility += (white_king_attacks + black_king_attacks) * 5;
+  
+  // 3. Passed Pawns (Geçer Piyonlar) - Simplified check
+  // Count pawns that are advanced and not blocked
+  int white_pawns = position.material_count[0];
+  int black_pawns = position.material_count[1];
+  
+  // Asymmetry in passed pawns increases volatility
+  if (abs(white_pawns - black_pawns) > 0) {
+    volatility += 15;
+  }
+  
+  return volatility;
+}
+
+// Cached version - use this in production
+inline int calculate_tactical_volatility(Position &position, ThreadInfo &thread_info) {
+  if (!armageddonPsychology) return 0;
+  
+  // Cache Kontrolü
+  if (thread_info.armaCache.key == position.zobrist_key) {
+    if (thread_info.armaCache.volatility != -1) {
+      return thread_info.armaCache.volatility;
+    }
+  } else {
+    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
+    thread_info.armaCache.clear();
+    thread_info.armaCache.key = position.zobrist_key;
+  }
+  
+  // Ağır Hesaplama (Sadece buraya düşerse yapılır)
+  int volatility = calculate_tactical_volatility_uncached(position);
+  
+  // Cache Yaz
+  thread_info.armaCache.volatility = volatility;
+  return volatility;
+}
+
+// Overload for backward compatibility
+inline int calculate_tactical_volatility(Position &position) {
+  if (!armageddonPsychology) return 0;
+  return calculate_tactical_volatility_uncached(position);
+}
+
 int eval(Position &position, ThreadInfo &thread_info) {
   int color = position.color;
   int root_color = thread_info.search_ply % 2 ? color ^ 1 : color;
@@ -447,6 +974,38 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
   eval = eval * multiplier;
 
+  // ============================================================================
+  // ARMAGEDDON PSYCHOLOGY: Pressure Index & Complexity Bias (CACHED) - OPTIMIZED
+  // ============================================================================
+  // This block handles "psychological" bonuses (complexity/sharpness) - separate from base Armageddon penalties
+  // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon Psychology is typically OFF
+  if (armageddonPsychology) [[unlikely]] {
+    int currentScore = eval + bonus1 + bonus2;  // Calculate once
+    
+    // Only apply psychology bonuses if game is not completely lost/won (within reasonable range)
+    if (abs(currentScore) < 400) {
+      // ADIM 3: The Pressure Score - Sharpness * Complexity * 8 (CACHED)
+      // This combines both sharpness (opponent's safe moves) and complexity (position noise)
+      int pressure_bonus = calculate_pressure_bonus(position, thread_info);
+      eval += pressure_bonus;
+      
+      // KATMAN 3: Tactical Volatility Index - Bonus for chaotic positions when losing/drawing (CACHED)
+      // Apply when score is very low (losing or near draw)
+      if (currentScore <= 10) {
+        int volatility = calculate_tactical_volatility(position, thread_info);
+        eval += volatility;
+      }
+      
+      // Additional complexity bonus when losing (currentScore < 50)
+      // Note: calculate_complexity() already calls calculate_pressure_bonus(), 
+      // but we keep this for backward compatibility and additional boost when losing
+      if (currentScore < 50) {
+        int complexityScore = calculate_complexity(position, thread_info);
+        eval += complexityScore;
+      }
+    }
+  }
+
   return std::clamp(eval + bonus1 + bonus2, ScoreLost + 1, ScoreWin - 1);
 }
 
@@ -504,6 +1063,14 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
     }
   }
   thread_info.game_hist[thread_info.game_ply].repetition = rep_count;
+
+  // ============================================================================
+  // CACHE INVALIDATION: Position changed, invalidate cache (OPTIMIZED)
+  // ============================================================================
+  // After making a move, the position key changes, so cache is invalid
+  // OPTIMIZATION: Soft invalidation (just set key=0) instead of full clear()
+  // Cache check will detect key mismatch and automatically invalidate
+  thread_info.armaCache.key = 0;
 
   thread_info.game_ply++;
 }
@@ -710,7 +1277,7 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   if (armageddonMode && !fortressDetectionEnabled) {
     // When Armageddon is ON but Fortress is OFF, still check upcoming repetition
     if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
       if (drawValue >= beta)
         return drawValue;
       alpha = std::max(alpha, drawValue);
@@ -718,9 +1285,10 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
   }
   
   // Fortress Detection: gameCycle check (sets gameCycle flag for pruning decisions)
-  if (fortressDetectionEnabled) {
+  // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
+  if (fortressDetectionEnabled) [[unlikely]] {
     if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
       if (drawValue >= beta)
         return drawValue;
       
@@ -860,8 +1428,9 @@ inline int qsearch(int alpha, int beta, Position &position, ThreadInfo &thread_i
       return ply - ScoreMate;  // Checkmate
     }
     // Stalemate - apply Armageddon penalty if enabled (FIX 2)
-    if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false);
+    // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
+    if (armageddonMode) [[unlikely]] {
+      return get_draw_value_armageddon(ply, false, thread_info.phase);
     }
     return 0;  // Normal stalemate = draw
   }
@@ -897,10 +1466,17 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   // ============================================================================
   bool gameCycle = false;
   bool kingDanger = false;
+  bool kingDangerThem = false;
   
   // Check for king danger (Fortress Detection)
-  if (fortressDetectionEnabled && !root) {
-    kingDanger = king_danger(position, color);
+  // IMPROVEMENT 2: Check both our king and opponent's king danger
+  // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
+  if (fortressDetectionEnabled && !root) [[unlikely]] {
+    bool ourMove = !(ply & 1);  // Even ply = our move (root side)
+    // Check our king danger when it's opponent's move
+    kingDanger = !ourMove && king_danger(position, color);
+    // Check opponent's king danger when it's our move
+    kingDangerThem = ourMove && king_danger(position, color ^ 1);
   }
 
   if (ply > thread_info.seldepth) {
@@ -918,7 +1494,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   if (armageddonMode && !fortressDetectionEnabled && !root) {
     // When Armageddon is ON but Fortress is OFF, still check upcoming repetition
     if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
       if (drawValue >= beta)
         return drawValue;
       alpha = std::max(alpha, drawValue);
@@ -929,7 +1505,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   // UPCOMING REPETITION CHECK (Crystal gameCycle - ONLY when Fortress Detection enabled)
   // ============================================================================
   if (fortressDetectionEnabled && !root && upcoming_repetition(position, thread_info)) {
-    int drawValue = get_draw_value_armageddon(ply, false);
+    int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
     if (drawValue >= beta)
       return drawValue;
     
@@ -943,8 +1519,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // At even ply (our turn): draw is bad for us (-ArmageddonPenalty)
     // At odd ply (opponent's turn): draw is good for them (+ArmageddonPenalty)
     // This ensures draws always propagate as bad for root side
-    if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false);
+    // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
+    if (armageddonMode) [[unlikely]] {
+      return get_draw_value_armageddon(ply, false, thread_info.phase);
     }
     
     // Normal draw score with small randomization
@@ -1138,13 +1715,37 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       tb_score = ScoreTbWin - ply;
       tb_bound = EntryTypes::LBound;
     } else {
-      // TB Draw - apply Armageddon penalty if armageddonTbPenalty is enabled (IMPROVEMENT 8)
-      if (armageddonMode && armageddonTbPenalty) {
-        tb_score = get_draw_value_armageddon(ply, false);  // Treat TB draw like regular draw
+      // TB Draw
+      uint32_t tb_wdl = TB_GET_WDL(tb_result);
+      
+      // ============================================================================
+      // MECHANISM 2: Syzygy TB "Risk-Taking" (DTZ Gambling)
+      // ============================================================================
+      // If Armageddon mode and TB says DRAW but DTZ > 80, encourage prolonging game
+      if (armageddonMode && tb_wdl == TB_DRAW) {
+        uint32_t dtz = TB_GET_DTZ(tb_result);
+        if (dtz > 80) {
+          // Game is far from ending - return small advantage to encourage continuation
+          tb_score = 10;  // Small advantage instead of 0
+          tb_bound = EntryTypes::Exact;
+        } else if (armageddonTbPenalty) {
+          // Close to endgame - apply full penalty
+          tb_score = get_draw_value_armageddon(ply, false, thread_info.phase);
+          tb_bound = EntryTypes::Exact;
+        } else {
+          // Normal: TB draws are exempt from Armageddon penalty
+          tb_score = 0;
+          tb_bound = EntryTypes::Exact;
+        }
+      } else if (armageddonMode && armageddonTbPenalty) {
+        // Armageddon TB Penalty enabled for other TB draw cases
+        tb_score = get_draw_value_armageddon(ply, false, thread_info.phase);
+        tb_bound = EntryTypes::Exact;
       } else {
-        tb_score = 0;  // Normal: TB draws are exempt from Armageddon penalty
+        // Normal: TB draws are exempt from Armageddon penalty
+        tb_score = 0;
+        tb_bound = EntryTypes::Exact;
       }
-      tb_bound = EntryTypes::Exact;
     }
 
     if ((tb_bound == EntryTypes::Exact) ||
@@ -1197,9 +1798,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   // ============================================================================
   // ARMAGEDDON: Rule 50 scaling - penalize positions approaching 50-move draw (FIX 4)
+  // OPTIMIZED: Early exit if halfmoves < 60 (function returns eval unchanged)
+  // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
   // ============================================================================
-  if (armageddonMode && !in_check && static_eval != ScoreNone) {
-    static_eval = apply_armageddon_rule50_scaling(static_eval, position.halfmoves, ply);
+  if (armageddonMode && !in_check && static_eval != ScoreNone && position.halfmoves >= 60) [[unlikely]] {
+    static_eval = apply_armageddon_rule50_scaling(static_eval, position.halfmoves, ply, thread_info.phase);
   }
 
   bool improving = false;
@@ -1292,8 +1895,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     MovePicker probcut_p;
     init_picker(probcut_p, position, threshold, in_check, ss);
     // Original Patricia uses SEE check; Crystal removes it (only when Fortress Detection enabled)
+    // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
     Move p_tt_move;
-    if (fortressDetectionEnabled) {
+    if (fortressDetectionEnabled) [[unlikely]] {
       // Crystal commit af181: Simplified - just check if tt_move is capture
       p_tt_move = (tt_move != MoveNone && is_cap(position, tt_move)) ? tt_move : MoveNone;
     } else {
@@ -1374,13 +1978,13 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                                  [extract_to(move)];
 
     // ============================================================================
-    // IMPROVEMENT 6: Armageddon-aware Move Ordering
+    // IMPROVEMENT 6: Armageddon-aware Move Ordering (OPTIMIZED)
     // ============================================================================
     // Penalize moves that would lead to repetition when Armageddon is enabled
-    if (armageddonMode && !root) {
-      Position temp = position;
-      make_move(temp, move);
-      if (would_cause_repetition(temp, thread_info)) {
+    // OPTIMIZATION: Use key_after_move to avoid position copy for most moves
+    // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
+    if (armageddonMode && !root) [[unlikely]] {
+      if (would_cause_repetition_after_move(position, move, thread_info)) {
         hist_score -= 3000;  // Heavy penalty in move ordering for repetition moves
       }
     }
@@ -1388,7 +1992,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     is_capture = is_cap(position, move);
     
     // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when Fortress Detection enabled)
-    if (fortressDetectionEnabled) {
+    // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
+    if (fortressDetectionEnabled) [[unlikely]] {
       ss->quietMoveStreak = is_capture ? 0 : (ss - 1)->quietMoveStreak + 1;
     }
     
@@ -1433,7 +2038,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     
     // Crystal: gameCycleExtension - extend when in game cycle to find escape (ONLY when Fortress Detection enabled)
     if (fortressDetectionEnabled && gameCycle) {
-      int drawValue = get_draw_value_armageddon(ply, false);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
       bool gameCycleExtension = is_pv || (ply > 2 && drawValue < 0);
       if (gameCycleExtension) {
         extension = 2;
@@ -1441,20 +2046,46 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
     
     // ============================================================================
-    // IMPROVEMENT 7: Armageddon Extension for Draw-Avoiding Moves
+    // IMPROVEMENT 7: Armageddon Extension for Draw-Avoiding Moves (OPTIMIZED)
     // ============================================================================
     // When in Armageddon mode and position is drawish, extend to find winning resources
-    if (armageddonMode && !fortressDetectionEnabled && extension == 0) {
+    // OPTIMIZATION: Use key_after_move instead of Position copy to avoid expensive copy
+    // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
+    if (armageddonMode && !fortressDetectionEnabled && extension == 0) [[unlikely]] {
       // Check if position is drawish (high halfmoves or upcoming repetition)
       bool drawish = position.halfmoves > 50;
       if (!drawish && !root) {
-        // Check if this move avoids a repetition
-        Position temp = position;
-        make_move(temp, move);
-        if (!would_cause_repetition(temp, thread_info)) {
-          // This move doesn't cause repetition - might be an escape
-          if (position.halfmoves > 30 || material_draw(position)) {
-            drawish = true;
+        // Check if this move avoids a repetition using key_after_move (avoids position copy)
+        bool key_calculated;
+        uint64_t key_after = key_after_move(position, move, &key_calculated);
+        
+        if (key_calculated) {
+          // Use key-based repetition check (fast path)
+          int halfmoves_after = position.halfmoves + 1;
+          int game_ply = thread_info.game_ply;
+          int end_index = std::max(game_ply - halfmoves_after, 0);
+          bool causes_repetition = false;
+          for (int i = game_ply - 1; i >= end_index; i -= 2) {
+            if (key_after == thread_info.game_hist[i].position_key) {
+              causes_repetition = true;
+              break;
+            }
+          }
+          if (!causes_repetition) {
+            // This move doesn't cause repetition - might be an escape
+            if (position.halfmoves > 30 || material_draw(position)) {
+              drawish = true;
+            }
+          }
+        } else {
+          // Fallback: complex move (castling, en passant, promotion) - use make_move
+          Position temp = position;
+          make_move(temp, move);
+          if (!would_cause_repetition(temp, thread_info)) {
+            // This move doesn't cause repetition - might be an escape
+            if (position.halfmoves > 30 || material_draw(position)) {
+              drawish = true;
+            }
           }
         }
       }
@@ -1466,7 +2097,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // Singular Extensions (SE): If a search finds that the TT move is way
     // better than all other moves, extend it under certain conditions.
     // Skip singular extension if gameCycle (only when Fortress Detection enabled)
-
+    // BRANCH PREDICTION: Combined check - both conditions are typically false
     if (!root && ply < thread_info.current_iter * 2 && !(fortressDetectionEnabled && gameCycle)) {
       if (!singular_search && depth >= SEDepth && move == tt_move &&
           abs(tt_score) < ScoreWin && tt_depth >= depth - 3 &&
@@ -1504,6 +2135,26 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     ss_push(position, thread_info, move);
 
+    // ============================================================================
+    // THE RAZOR'S EDGE KATMAN 2: Singularity Exploitation (Armageddon Psychology Only) - OPTIMIZED
+    // ============================================================================
+    // After making a move, check if opponent is now in a singular position
+    // If so, give bonus to this move (it forces opponent into "only-move" situation)
+    // OPTIMIZED: Uses fast bitboard-based sharpness estimation instead of expensive move generation
+    // NOTE: This is Psychology feature, not base Armageddon (draw penalties)
+    int singularity_bonus = 0;
+    if (armageddonPsychology && !root && depth >= 3) [[unlikely]] {
+      // Check opponent's sharpness level after our move (fast bitboard calculation)
+      int opp_sharpness = estimate_sharpness_bitboard(moved_position);
+      
+      // If opponent is in a sharp position (high sharpness = restricted), this move is valuable
+      if (opp_sharpness >= 3) {
+        singularity_bonus = 30;  // Strong bonus - opponent is in critical position (EXTREME or HIGH)
+      } else if (opp_sharpness >= 2) {
+        singularity_bonus = 15;  // Moderate bonus - opponent has limited options (HIGH)
+      }
+    }
+
     bool full_search = false;
     int newdepth = std::min(depth - 1 + extension, 126);
 
@@ -1516,10 +2167,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     // Original Patricia LMR condition: depth >= LMRMinDepth && moves_played > is_pv
     // Crystal adds: skip when gameCycle, extra (!is_pv || ply > 1) condition
+    // IMPROVEMENT 2: Also consider opponent's king danger in LMR allowance
+    // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
     bool allowLMR;
-    if (fortressDetectionEnabled) {
+    if (fortressDetectionEnabled) [[unlikely]] {
       bool skipLMRForGameCycle = gameCycle;
-      allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle && (!is_pv || ply > 1);
+      // Skip LMR if opponent's king is in danger (unless at high ply)
+      allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle && 
+                 (!kingDangerThem || ply > 6) && (!is_pv || ply > 1);
     } else {
       // Original Patricia: just depth check
       allowLMR = depth >= LMRMinDepth;
@@ -1553,8 +2208,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       R = std::clamp(R, 0, newdepth - 1);
       
       // LMR depth formula: Crystal uses updated formula only when Fortress Detection enabled
+      // BRANCH PREDICTION: [[unlikely]] attribute - Fortress Detection is typically OFF
       int lmr_depth;
-      if (fortressDetectionEnabled) {
+      if (fortressDetectionEnabled) [[unlikely]] {
         // Crystal commit 678d5: Updated LMR depth formula
         lmr_depth = std::max(1, std::min(newdepth - R, newdepth + 2)) + is_pv;
       } else {
@@ -1586,6 +2242,15 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     ss_pop(thread_info);
     thread_info.phase = phase;
+
+    // ============================================================================
+    // THE RAZOR'S EDGE KATMAN 2: Apply Singularity Bonus to Score
+    // ============================================================================
+    // If this move forces opponent into singular position, add bonus
+    // Note: score is from opponent's perspective (negative), so we subtract bonus
+    if (armageddonPsychology && singularity_bonus > 0) {
+      score += singularity_bonus;  // Add bonus (score is negative, so this makes it less negative = better for us)
+    }
 
     if (thread_data.stop || thread_info.datagen_stop) {
       // return if we ran out of time for search
@@ -1642,8 +2307,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     if (singular_search) return alpha;
     if (in_check) return ply - ScoreMate;  // Checkmate
     // Stalemate - apply Armageddon penalty if enabled (FIX 2)
-    if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false);
+    // BRANCH PREDICTION: [[unlikely]] attribute - Armageddon mode is typically OFF
+    if (armageddonMode) [[unlikely]] {
+      return get_draw_value_armageddon(ply, false, thread_info.phase);
     }
     return 0;  // Normal stalemate = draw
   }

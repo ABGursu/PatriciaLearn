@@ -12,7 +12,12 @@ using std::array;
 
 typedef unsigned __int128 uint128_t;
 
-struct ThreadInfo {
+// ============================================================================
+// MEMORY ALIGNMENT OPTIMIZATION: Cache line alignment (64 bytes)
+// ============================================================================
+// Align ThreadInfo struct to cache line boundary to avoid false sharing
+// and improve cache performance. Hot path data is placed at the beginning.
+struct alignas(64) ThreadInfo {
   uint16_t thread_id = 0; // ID of the thread
   std::array<GameHistory, GameSize>
       game_hist;       // all positions from earlier in the game
@@ -71,6 +76,27 @@ struct ThreadInfo {
   uint8_t searches = 0;
   volatile bool searching = false;
   uint8_t phase;
+  
+  // ============================================================================
+  // ARMAGEDDON CACHE: Performance optimization for expensive calculations
+  // ============================================================================
+  // Unified cache structure for all Armageddon mode calculations
+  struct ArmageddonCache {
+    uint64_t key = 0;          // Position Zobrist Key
+    int sharpness = -1;        // -1: Not calculated (replaces safe_moves - bitboard-based)
+    int complexity = -1;       // -1: Not calculated
+    int volatility = -1;       // -1: Not calculated
+    int pressure_bonus = -1;   // -1: Not calculated
+    
+    // Cache'i sıfırlama fonksiyonu (her yeni aramada veya make_move'da çağrılabilir)
+    void clear() {
+      key = 0;
+      sharpness = -1;
+      complexity = -1;
+      volatility = -1;
+      pressure_bonus = -1;
+    }
+  } armaCache;
 };
 
 RootMoveInfo *find_root_move(ThreadInfo &thread_info, Move move) {
@@ -111,6 +137,12 @@ void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   std::memset(&TT[0], 0, TT_size * sizeof(TT[0]));
   thread_info.searches = 0;
   thread_info.cp_accum_loss = 0;
+  
+  // ============================================================================
+  // RESET ARMAGEDDON CACHE: New game, invalidate cache (OPTIMIZED)
+  // ============================================================================
+  // OPTIMIZATION: Soft invalidation (just set key=0) instead of full clear()
+  thread_info.armaCache.key = 0;
 }
 
 uint16_t get_hash_low_bits(uint64_t hash) {

@@ -116,7 +116,12 @@ struct MoveInfo {
   uint8_t len = 0;
 };
 
-struct Position {
+// ============================================================================
+// MEMORY ALIGNMENT OPTIMIZATION: Cache line alignment (64 bytes)
+// ============================================================================
+// Align Position struct to cache line boundary to avoid false sharing
+// and improve cache performance
+struct alignas(64) Position {
   uint64_t zobrist_key; // hash key
   uint64_t pawn_key;
   std::array<uint64_t, 2> non_pawn_key;

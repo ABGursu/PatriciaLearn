@@ -223,6 +223,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Experience Book Max Moves type spin default 16 min 1 max 100\n"
              "option name Fortress Detection type check default false\n"
              "option name Armageddon type check default false\n"
+             "option name Armageddon Psychology type check default false\n"
              "option name Armageddon TB Penalty type check default false\n");
 
       /*for (auto &param : params) {
@@ -369,6 +370,16 @@ void uci(ThreadInfo &thread_info, Position &position) {
         bool enabled = (val == "true");
         set_armageddon_mode(enabled);
         printf("info string Armageddon mode is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Armageddon Psychology") {
+        // The multi-word name was already parsed, "value" was already consumed
+        std::string val;
+        input_stream >> val;  // true/false
+        bool enabled = (val == "true");
+        set_armageddon_psychology(enabled);
+        printf("info string Armageddon Psychology is now: %s\n", enabled ? "enabled" : "disabled");
         continue;
       }
 
