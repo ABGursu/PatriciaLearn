@@ -1,6 +1,0 @@
-uci
-isready
-setoption name Armageddon value true
-position startpos moves e2e4 e7e5 g1f3 b8c6
-go depth 8
-quit
