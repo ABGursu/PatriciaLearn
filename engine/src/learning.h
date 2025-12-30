@@ -265,9 +265,9 @@ extern std::atomic<bool> g_benchSingleShot;
 
 void touch();
 
-// Utility commands (defrag, merge, show_exp)
+// Utility commands (defrag, merge)
+// Note: exp and expex commands are implemented in uci.h to avoid LTO multiple definition errors
 void defrag(const std::string& filename);
 void merge(const std::vector<std::string>& filenames);
-void show_exp(uint64_t key, bool extended = false);
 
 } // namespace Learning

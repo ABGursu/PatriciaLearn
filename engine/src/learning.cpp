@@ -718,19 +718,21 @@ static std::string unquote(const std::string& s) {
 }
 
 // Defrag command: defragments an experience file
-// Usage: defrag <filename>
+// Usage: defrag [filename] (if no filename, uses Experience File option)
 void defrag(const std::string& filename) {
   wait_for_loading_finished();
   
   std::string fn = unquote(filename);
   
+  // If no filename provided, use the "Experience File" option (like HypnoS)
   if (fn.empty()) {
-    printf("info string Error: No filename provided\n");
-    printf("info string Syntax: defrag <filename>\n");
-    return;
+    fn = experienceFilename;
+    if (fn.empty()) {
+      fn = "patricia.exp";  // Default fallback
+    }
   }
   
-  printf("info string Defragmenting experience file: %s\n", fn.c_str());
+  printf("\nDefragmenting experience file: %s\n", fn.c_str());
   
   // Create a temporary ExperienceData to load and re-save
   ExperienceData exp;
@@ -784,93 +786,7 @@ void merge(const std::vector<std::string>& filenames) {
   printf("info string Merge complete\n");
 }
 
-// Show_exp command: displays experience data for a position
-// Usage: show_exp (displays experience for current position)
-void show_exp(uint64_t key, bool extended) {
-  wait_for_loading_finished();
-  
-  printf("info string Experience for position key: %llu\n", 
-         static_cast<unsigned long long>(key));
-  
-  const ExpEntryEx* head = probe(key);
-  if (!head) {
-    printf("info string No experience data found for this position\n");
-    return;
-  }
-  
-  int evalImportance = get_experience_book_eval_importance();
-  
-  // Collect entries with quality scores
-  std::vector<std::pair<const ExpEntryEx*, int>> qualityList;
-  for (const ExpEntryEx* t = head; t; t = t->next) {
-    qualityList.emplace_back(t, t->quality(evalImportance));
-  }
-  
-  // Sort by quality (highest first)
-  std::stable_sort(qualityList.begin(), qualityList.end(),
-                   [](const auto& a, const auto& b) { return a.second > b.second; });
-  
-  printf("\n");
-  int expCount = 0;
-  
-  for (const auto& pr : qualityList) {
-    int32_t value = pr.first->value;
-    int32_t depth = pr.first->depth;
-    uint16_t count = pr.first->count;
-    uint16_t move = static_cast<uint16_t>(pr.first->move);
-    int quality = pr.second;
-    
-    // Extract move components using Patricia's format:
-    // from: bits 10-15, to: bits 4-9, promo: bits 2-3, type: bits 0-1
-    int from = (move >> 10) & 0x3F;
-    int to = (move >> 4) & 0x3F;
-    int promo = (move >> 2) & 0x3;
-    int type = move & 0x3;
-    
-    // Convert to algebraic notation
-    char from_file = 'a' + (from % 8);
-    char from_rank = '1' + (from / 8);
-    char to_file = 'a' + (to % 8);
-    char to_rank = '1' + (to / 8);
-    
-    char moveStr[8];
-    // type == 1 is promotion
-    if (type == 1) {
-      const char* promoChars = "nbrq";  // 0=knight, 1=bishop, 2=rook, 3=queen
-      snprintf(moveStr, sizeof(moveStr), "%c%c%c%c%c", 
-               from_file, from_rank, to_file, to_rank, promoChars[promo]);
-    } else {
-      snprintf(moveStr, sizeof(moveStr), "%c%c%c%c", 
-               from_file, from_rank, to_file, to_rank);
-    }
-    
-    // Eval string
-    char evalStr[32];
-    snprintf(evalStr, sizeof(evalStr), "cp %d", value);
-    
-    // Check for mate scores
-    constexpr int32_t VALUE_MATE = 32000;
-    constexpr int MAX_PLY = 256;
-    if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
-      int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
-      int m = (plies + 1) / 2;
-      if (value <= -VALUE_MATE + MAX_PLY) m = -m;
-      char mateStr[16];
-      snprintf(mateStr, sizeof(mateStr), " (mate %d)", m);
-      strcat(evalStr, mateStr);
-    }
-    
-    if (extended) {
-      printf("%2d: %-5s, depth: %2d, eval: %-12s, count: %5u, quality: %d\n",
-             ++expCount, moveStr, depth, evalStr, count, quality);
-    } else {
-      printf("%2d: %-5s, depth: %2d, eval: %s\n",
-             ++expCount, moveStr, depth, evalStr);
-    }
-  }
-  
-  printf("\n");
-}
+// show_exp implementation moved to uci.h to avoid LTO multiple definition errors
 
 } // namespace Learning
 

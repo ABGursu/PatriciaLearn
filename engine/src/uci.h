@@ -172,6 +172,10 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
   printf("Patricia Chess Engine 5.1, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
+  // Initialize Learning system (load experience file)
+  Learning::init();
+  Learning::wait_for_loading_finished();
+
   new_game(thread_info, TT);
   set_board(position, thread_info,
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
@@ -671,40 +675,171 @@ void uci(ThreadInfo &thread_info, Position &position) {
                         (std::max((int64_t)1, time_elapsed(start_time)))));
     }
 
-    // Experience utility commands
+    // Experience utility commands (matching HypnoS exactly)
     else if (command == "defrag") {
+      Learning::wait_for_loading_finished();
+      
       std::string filename;
-      if (std::getline(input_stream, filename)) {
-        // Trim leading whitespace
-        size_t start = filename.find_first_not_of(" \t");
-        if (start != std::string::npos) {
-          filename = filename.substr(start);
-        }
+      std::string token;
+      // Read optional filename (like HypnoS)
+      if (input_stream >> token) {
+        filename = token;
       }
-      if (filename.empty()) {
-        printf("info string Syntax: defrag <filename>\n");
-      } else {
-        Learning::defrag(filename);
-      }
+      // If no filename provided, defrag will use Experience File option
+      Learning::defrag(filename);
     }
 
     else if (command == "merge") {
+      Learning::wait_for_loading_finished();
+      
       std::vector<std::string> filenames;
       std::string token;
       while (input_stream >> token) {
         filenames.push_back(token);
       }
-      Learning::merge(filenames);
+      
+      if (filenames.empty()) {
+        printf("info string Error : Incorrect merge command\n");
+        printf("info string Syntax: merge <filename> <filename1> [filename2] ... [filenameX]\n");
+        printf("info string The first <filename> is also the target experience file which will contain all the merged data\n");
+        printf("info string The files <filename1> ... <filenameX> are the other experience files to be merged\n");
+      } else {
+        Learning::merge(filenames);
+      }
     }
 
-    else if (command == "show_exp") {
-      // Show experience for current position
-      Learning::show_exp(position.zobrist_key, false);
+    else if (command == "exp") {
+      // Show Experience for the current position (synthetic view)
+      Learning::wait_for_loading_finished();
+      
+      // Debug: Print position info
+      printf("Experience: Position key: %llu\n", static_cast<unsigned long long>(position.zobrist_key));
+      
+      if (!Learning::enabled()) {
+        printf("Experience system is disabled\n");
+      } else {
+        const Learning::ExpEntryEx* head = Learning::probe(position.zobrist_key);
+        if (!head) {
+          printf("No experience data found for this position\n");
+        } else {
+        int evalImportance = Learning::get_experience_book_eval_importance();
+        
+        // Collect entries with quality scores (using positional quality like HypnoS)
+        std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
+        for (const Learning::ExpEntryEx* t = head; t; t = t->next) {
+          // Use positional quality with lookahead (like HypnoS)
+          auto [q, maybeDraw] = t->quality_positional(position, evalImportance,
+            [](Position& pos, uint16_t mv) { make_move(pos, static_cast<Move>(mv)); });
+          qualityList.emplace_back(t, q);
+        }
+        
+        // Sort by quality (highest first)
+        std::stable_sort(qualityList.begin(), qualityList.end(),
+                         [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        printf("\n");
+        int expCount = 0;
+        
+        for (const auto& pr : qualityList) {
+          int32_t value = pr.first->value;
+          int32_t depth = pr.first->depth;
+          uint16_t count = pr.first->count;
+          Move move = static_cast<Move>(pr.first->move);
+          int quality = pr.second;
+          
+          // Convert move to UCI string using internal_to_uci (like HypnoS uses UCIEngine::move)
+          std::string moveStr = internal_to_uci(position, move);
+          
+          // Eval string: convert to centipawns (like HypnoS)
+          int cp = value;  // Already in centipawns
+          char evalStr[64];
+          snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
+          
+          // Check for mate scores
+          constexpr int32_t VALUE_MATE = 32000;
+          constexpr int MAX_PLY = 256;
+          if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
+            int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
+            int m = (plies + 1) / 2;
+            if (value <= -VALUE_MATE + MAX_PLY) m = -m;
+            snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+          }
+          
+          // Format output exactly like HypnoS
+          printf("%2d: %-5s, depth: %2d, eval: %s\n",
+                 ++expCount, moveStr.c_str(), depth, evalStr);
+        }
+        
+        printf("\n");
+        }
+      }
     }
 
-    else if (command == "show_exp_extended") {
-      // Show extended experience for current position
-      Learning::show_exp(position.zobrist_key, true);
+    else if (command == "expex") {
+      // Show Experience for the current position (extended view)
+      Learning::wait_for_loading_finished();
+      
+      // Debug: Print position info
+      printf("Experience: Position key: %llu\n", static_cast<unsigned long long>(position.zobrist_key));
+      
+      if (!Learning::enabled()) {
+        printf("Experience system is disabled\n");
+      } else {
+        const Learning::ExpEntryEx* head = Learning::probe(position.zobrist_key);
+        if (!head) {
+          printf("No experience data found for this position\n");
+        } else {
+        int evalImportance = Learning::get_experience_book_eval_importance();
+        
+        // Collect entries with quality scores (using positional quality like HypnoS)
+        std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
+        for (const Learning::ExpEntryEx* t = head; t; t = t->next) {
+          // Use positional quality with lookahead (like HypnoS)
+          auto [q, maybeDraw] = t->quality_positional(position, evalImportance,
+            [](Position& pos, uint16_t mv) { make_move(pos, static_cast<Move>(mv)); });
+          qualityList.emplace_back(t, q);
+        }
+        
+        // Sort by quality (highest first)
+        std::stable_sort(qualityList.begin(), qualityList.end(),
+                         [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        printf("\n");
+        int expCount = 0;
+        
+        for (const auto& pr : qualityList) {
+          int32_t value = pr.first->value;
+          int32_t depth = pr.first->depth;
+          uint16_t count = pr.first->count;
+          Move move = static_cast<Move>(pr.first->move);
+          int quality = pr.second;
+          
+          // Convert move to UCI string using internal_to_uci (like HypnoS uses UCIEngine::move)
+          std::string moveStr = internal_to_uci(position, move);
+          
+          // Eval string: convert to centipawns (like HypnoS)
+          int cp = value;  // Already in centipawns
+          char evalStr[64];
+          snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
+          
+          // Check for mate scores
+          constexpr int32_t VALUE_MATE = 32000;
+          constexpr int MAX_PLY = 256;
+          if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
+            int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
+            int m = (plies + 1) / 2;
+            if (value <= -VALUE_MATE + MAX_PLY) m = -m;
+            snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+          }
+          
+          // Format output exactly like HypnoS (extended)
+          printf("%2d: %-5s, depth: %2d, eval: %-12s, count: %6u, quality: %6d\n",
+                 ++expCount, moveStr.c_str(), depth, evalStr, count, quality);
+        }
+        
+        printf("\n");
+        }
+      }
     }
 
     else if (command == "bench") {
