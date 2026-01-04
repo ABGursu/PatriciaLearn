@@ -170,7 +170,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
   // All printf calls will still go to stdout (for UCI), but we'll also log them
   Debug::init();
 
-  printf("Patricia Chess Engine 5.1, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
+  printf("Patricia Chess Engine 5.2, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
   // Initialize Learning system (load experience file)
   Learning::init();
@@ -241,7 +241,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "uci") {
-      printf("id name Patricia 5.1\n"
+      printf("id name Patricia 5.2\n"
              "id author Adam Kulju\n"
              "option name Hash type spin default 32 min 1 max 131072\n"
              "option name Threads type spin default 1 min 1 max 1024\n"

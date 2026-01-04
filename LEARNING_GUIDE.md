@@ -1,9 +1,9 @@
-# Patricia Chess Engine 5.1: Learning System Technical Documentation
+# Patricia Chess Engine 5.2: Learning System Technical Documentation
 
 **Version:** 1.0  
 **Date:** 2025  
 **Author:** A. B. Gursu  
-**Based on:** Patricia Chess Engine 5.1 by Adam Kulju
+**Based on:** Patricia Chess Engine 5.2 by Adam Kulju
 
 ---
 
@@ -25,7 +25,7 @@
 
 ## Introduction
 
-The Learning system in Patricia Chess Engine 5.1 is an advanced experience-based learning mechanism that allows the engine to learn from its own games and improve its play over time. The system stores position evaluations, move choices, and search depths from previous games, creating a persistent knowledge base that enhances move ordering, provides opening book functionality, and improves overall playing strength.
+The Learning system in Patricia Chess Engine 5.2 is an advanced experience-based learning mechanism that allows the engine to learn from its own games and improve its play over time. The system stores position evaluations, move choices, and search depths from previous games, creating a persistent knowledge base that enhances move ordering, provides opening book functionality, and improves overall playing strength.
 
 ### Key Features
 
@@ -769,7 +769,7 @@ Special handling for benchmark mode:
 
 ## Conclusion
 
-The Learning system in Patricia Chess Engine 5.1 is a sophisticated experience-based learning mechanism that:
+The Learning system in Patricia Chess Engine 5.2 is a sophisticated experience-based learning mechanism that:
 
 1. **Learns from Games**: Automatically collects experience during play
 2. **Improves Performance**: Enhances move ordering and provides instant book moves

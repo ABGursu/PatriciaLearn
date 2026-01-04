@@ -1,4 +1,4 @@
-# Patricia Chess Engine 5.1
+# Patricia Chess Engine 5.2
 <div align="center">
 
   <img src="Patricia_logo.png" width="400" height="400" alt="Patricia logo">
