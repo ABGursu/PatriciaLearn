@@ -1178,29 +1178,29 @@ int eval(Position &position, ThreadInfo &thread_info) {
 
   for (int idx = start_index + 2; idx < thread_info.game_ply - 4; idx += 2) {
 
-    if (thread_info.game_hist[idx].m_diff < s_m &&
-        thread_info.game_hist[idx + 1].m_diff > s_m &&
-        thread_info.game_hist[idx + 2].m_diff < s_m &&
-        thread_info.game_hist[idx + 3].m_diff > s_m &&
-        thread_info.game_hist[idx + 4].m_diff < s_m) {
+    if (thread_info.game_hist[idx].m_diff < 0 &&
+        thread_info.game_hist[idx + 1].m_diff > 0 &&
+        thread_info.game_hist[idx + 2].m_diff < 0 &&
+        thread_info.game_hist[idx + 3].m_diff > 0 &&
+        thread_info.game_hist[idx + 4].m_diff < 0) {
 
-      s = s_m + thread_info.game_hist[idx + 4].m_diff;
+      s = thread_info.game_hist[idx + 4].m_diff;
       break;
     }
 
     if (thread_info.game_hist[idx].m_diff < 0 &&
         thread_info.game_hist[idx].m_diff == material_eval(position, thread_info)) {
 
-      s = 1;
+      s = thread_info.game_hist[idx].m_diff;
       break;
     }
   }
   if (s && total_mat(position, thread_info) > 3500) {
 
     if (thread_info.search_ply % 2) {
-      bonus2 = -40 * (eval < -300 ? 2 : eval < 0 ? 1 : 0);
+      bonus2 = -40 * (eval < -300 ? 2 : eval < 0 ? 1 : 0) * 10 / (s < -300 ? 5 : s < -100 ? 10 : 20);
     } else {
-      bonus2 = 40 * (eval > 300 ? 2 : eval > 0 ? 1 : 0);
+      bonus2 = 40 * (eval > 300 ? 2 : eval > 0 ? 1 : 0) * 10 / (s < -300 ? 5 : s < -100 ? 10 : 20);
     }
   }
 
