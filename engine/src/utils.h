@@ -384,6 +384,7 @@ namespace Debug {
   void close();
   void log(const char* str);
   void logf(const char* format, ...);
+  void set_enabled(bool value);
 }
 
 // Macro to intercept all printf calls and log them to both stdout and debug.log

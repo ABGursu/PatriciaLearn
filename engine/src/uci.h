@@ -166,9 +166,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  // Initialize debug logging first - this opens the log file
-  // All printf calls will still go to stdout (for UCI), but we'll also log them
-  Debug::init();
+  // Debug logging is disabled by default (controlled by UCI option)
+  // Debug::init() will be called when user enables "Debug Logging" option
 
   printf("Patricia Chess Engine 5.2, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
@@ -261,6 +260,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
              "option name Armageddon type check default false\n"
              "option name Armageddon Psychology type check default false\n"
              "option name Armageddon TB Penalty type check default false\n"
+             "option name Debug Logging type check default false\n"
 );
 
       /*for (auto &param : params) {
@@ -445,6 +445,21 @@ void uci(ThreadInfo &thread_info, Position &position) {
         bool enabled = (val == "true");
         set_armageddon_tb_penalty(enabled);
         printf("info string Armageddon TB Penalty is now: %s\n", enabled ? "enabled" : "disabled");
+        continue;
+      }
+
+      else if (name == "Debug Logging" || case_insensitive_compare(name, "Debug Logging")) {
+        // The multi-word name was already parsed, "value" was already consumed
+        std::string val;
+        input_stream >> val;  // true/false
+        bool enabled = (val == "true");
+        Debug::set_enabled(enabled);
+        if (enabled) {
+          Debug::init();  // Open log file when enabled
+        } else {
+          Debug::close();  // Close log file when disabled
+        }
+        printf("info string Debug Logging is now: %s\n", enabled ? "enabled" : "disabled");
         continue;
       }
 

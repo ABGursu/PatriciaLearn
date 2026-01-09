@@ -9,9 +9,19 @@
 // This does NOT redirect stdout, so UCI communication works normally
 namespace Debug {
   static std::ofstream log_file;
+  static bool enabled = false;  // Default: disabled (UCI option controls this)
+  
+  void set_enabled(bool value) {
+    enabled = value;
+    if (!enabled && log_file.is_open()) {
+      log_file.close();
+    }
+  }
   
   void init() {
-    log_file.open("debug.log", std::ios::out | std::ios::app);
+    if (enabled) {
+      log_file.open("debug.log", std::ios::out | std::ios::app);
+    }
   }
   
   void logf(const char* format, ...) {
@@ -26,8 +36,8 @@ namespace Debug {
       fputs(buffer, stdout);
       fflush(stdout);
       
-      // Also write to log file
-      if (log_file.is_open()) {
+      // Also write to log file if enabled
+      if (enabled && log_file.is_open()) {
         log_file << buffer;
         log_file.flush();
       }
@@ -39,8 +49,8 @@ namespace Debug {
     fputs(str, stdout);
     fflush(stdout);
     
-    // Also write to log file
-    if (log_file.is_open()) {
+    // Also write to log file if enabled
+    if (enabled && log_file.is_open()) {
       log_file << str;
       log_file.flush();
     }
