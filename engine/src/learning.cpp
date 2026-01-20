@@ -1,4 +1,5 @@
 #include "learning.h"
+#include "sparsehash/dense_hash_set"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -9,12 +10,12 @@
 #include <iostream>
 #include <limits>
 #include <vector>
-#include "sparsehash/dense_hash_set"
 
 namespace Learning {
 
-// Wrapper class for google::dense_hash_map with automatic empty/deleted key setup
-template<typename TKey, typename TVal>
+// Wrapper class for google::dense_hash_map with automatic empty/deleted key
+// setup
+template <typename TKey, typename TVal>
 class ExpHashMap : public google::dense_hash_map<TKey, TVal> {
 public:
   ExpHashMap() {
@@ -41,19 +42,19 @@ constexpr size_t WriteBufferSize = 1024 * 1024 * 16; // 16MB
 class ExperienceData {
 private:
   std::string _filename;
-  std::vector<ExpEntryEx*> _expData;
-  std::vector<ExpEntryEx*> _newPvExp;
-  std::vector<ExpEntryEx*> _newMultiPvExp;
-  std::vector<ExpEntryEx*> _oldExpData;
+  std::vector<ExpEntryEx *> _expData;
+  std::vector<ExpEntryEx *> _newPvExp;
+  std::vector<ExpEntryEx *> _newMultiPvExp;
+  std::vector<ExpEntryEx *> _oldExpData;
 
   // Hash map: key -> ExpEntryEx* (linked list head)
   // Using google::dense_hash_map for better performance
-  ExpHashMap<uint64_t, ExpEntryEx*> _mainExp;
+  ExpHashMap<uint64_t, ExpEntryEx *> _mainExp;
 
   bool _loading;
   std::atomic<bool> _abortLoading;
   std::atomic<bool> _loadingResult;
-  std::thread* _loaderThread;
+  std::thread *_loaderThread;
   std::condition_variable _loadingCond;
   std::mutex _loaderMutex;
 
@@ -65,11 +66,11 @@ private:
     clear_new_exp();
 
     // Free main exp data
-    for (ExpEntryEx*& p : _expData)
+    for (ExpEntryEx *&p : _expData)
       free(p);
 
     // Delete previous game experience data
-    for (ExpEntryEx*& p : _oldExpData)
+    for (ExpEntryEx *&p : _oldExpData)
       delete p;
 
     _mainExp.clear();
@@ -78,14 +79,14 @@ private:
   }
 
   void clear_new_exp() {
-    for (auto& newExp : {_newPvExp, _newMultiPvExp})
+    for (auto &newExp : {_newPvExp, _newMultiPvExp})
       std::copy(newExp.begin(), newExp.end(), std::back_inserter(_oldExpData));
 
     _newPvExp.clear();
     _newMultiPvExp.clear();
   }
 
-  bool link_entry(ExpEntryEx* exp) {
+  bool link_entry(ExpEntryEx *exp) {
     auto itr = _mainExp.find(exp->key);
 
     // If new entry: insert into map
@@ -95,7 +96,7 @@ private:
     }
 
     // If existing entry and same move exists then merge
-    ExpEntryEx* exp2 = itr->second->find(static_cast<uint16_t>(exp->move));
+    ExpEntryEx *exp2 = itr->second->find(static_cast<uint16_t>(exp->move));
     if (exp2) {
       exp2->merge(exp);
       return false;
@@ -124,7 +125,7 @@ private:
     } while (true);
   }
 
-  bool _load(const std::string& fn) {
+  bool _load(const std::string &fn) {
     std::ifstream in(fn, std::ios::in | std::ios::binary | std::ios::ate);
 
     if (!in.is_open()) {
@@ -141,14 +142,15 @@ private:
       return false;
     }
 
-    // Check signature (accept both PatriciaLearn and HypnoS signatures for compatibility)
+    // Check signature (accept both PatriciaLearn and HypnoS signatures for
+    // compatibility)
     in.seekg(0, std::ios::beg);
     char sigBuffer[256];
     const size_t sigLen = strlen(ExperienceSignature);
-    constexpr const char* HypnoSSignature = "SugaR Experience version 2";
+    constexpr const char *HypnoSSignature = "SugaR Experience version 2";
     const size_t hypnoSSigLen = strlen(HypnoSSignature);
     const size_t maxSigLen = std::max(sigLen, hypnoSSigLen);
-    
+
     if (inSize < maxSigLen) {
       std::cout << "info string The file [" << fn
                 << "] is not a valid experience file" << std::endl;
@@ -164,7 +166,7 @@ private:
     // Check if it matches PatriciaLearn signature
     bool isPatriciaSig = (memcmp(sigBuffer, ExperienceSignature, sigLen) == 0);
     // Check if it matches HypnoS signature (for file compatibility)
-    bool isHypnoSSig = (inSize >= hypnoSSigLen && 
+    bool isHypnoSSig = (inSize >= hypnoSSigLen &&
                         memcmp(sigBuffer, HypnoSSignature, hypnoSSigLen) == 0);
 
     if (!isPatriciaSig && !isHypnoSSig) {
@@ -185,13 +187,14 @@ private:
 
     if (expCount * sizeof(ExpEntry) != entriesDataLength) {
       std::cout << "info string The file [" << fn
-                << "] has invalid size (not multiple of entry size)" << std::endl;
+                << "] has invalid size (not multiple of entry size)"
+                << std::endl;
       return false;
     }
 
     // Allocate buffer for ExpEntryEx data
-    auto* expData = static_cast<ExpEntryEx*>(
-        malloc(expCount * sizeof(ExpEntryEx)));
+    auto *expData =
+        static_cast<ExpEntryEx *>(malloc(expCount * sizeof(ExpEntryEx)));
 
     if (!expData) {
       std::cerr << "info string Failed to allocate "
@@ -205,7 +208,7 @@ private:
 
     // Load experience entries
     size_t duplicateMoves = 0;
-    ExpEntryEx* exp = expData;
+    ExpEntryEx *exp = expData;
 
     for (size_t i = 0; i < expCount; ++i, ++exp) {
       if (_abortLoading.load(std::memory_order_relaxed))
@@ -214,7 +217,7 @@ private:
       exp->next = nullptr;
 
       // Read ExpEntry data
-      if (!in.read(reinterpret_cast<char*>(exp), sizeof(ExpEntry))) {
+      if (!in.read(reinterpret_cast<char *>(exp), sizeof(ExpEntry))) {
         std::cout << "info string Failed to read experience entry #" << i + 1
                   << " of " << expCount << std::endl;
         free(expData);
@@ -235,8 +238,7 @@ private:
 
     // Show statistics
     if (prevPosCount) {
-      std::cout << "info string " << fn
-                << " -> Total new moves: " << expCount
+      std::cout << "info string " << fn << " -> Total new moves: " << expCount
                 << ". Total new positions: " << (_mainExp.size() - prevPosCount)
                 << ". Duplicate moves: " << duplicateMoves << std::endl;
     } else {
@@ -255,7 +257,7 @@ private:
     return true;
   }
 
-  bool _save(const std::string& fn, bool saveAll) {
+  bool _save(const std::string &fn, bool saveAll) {
     std::fstream out;
     out.open(fn, std::ios::out | std::ios::binary | std::ios::app);
 
@@ -274,8 +276,9 @@ private:
       out.seekp(0, std::fstream::beg);
       out.write(ExperienceSignature, strlen(ExperienceSignature));
       if (!out) {
-        std::cout << "info string Failed to write signature to experience file ["
-                  << fn << "]" << std::endl;
+        std::cout
+            << "info string Failed to write signature to experience file ["
+            << fn << "]" << std::endl;
         return false;
       }
     }
@@ -285,11 +288,10 @@ private:
     std::vector<char> writeBuffer;
     writeBuffer.reserve(WriteBufferSize);
 
-    auto write_entry = [&](const ExpEntry* exp, bool force) -> bool {
+    auto write_entry = [&](const ExpEntry *exp, bool force) -> bool {
       if (exp) {
-        const char* data = reinterpret_cast<const char*>(exp);
-        writeBuffer.insert(writeBuffer.end(), data,
-                          data + sizeof(ExpEntry));
+        const char *data = reinterpret_cast<const char *>(exp);
+        writeBuffer.insert(writeBuffer.end(), data, data + sizeof(ExpEntry));
       }
 
       bool success = true;
@@ -307,19 +309,19 @@ private:
       size_t allMoves = 0;
       size_t allPositions = 0;
 
-      for (ExpEntryEx* expEx : _newPvExp)
+      for (ExpEntryEx *expEx : _newPvExp)
         link_entry(expEx);
 
-      for (ExpEntryEx* expEx : _newMultiPvExp)
+      for (ExpEntryEx *expEx : _newMultiPvExp)
         link_entry(expEx);
 
-      for (auto& x : _mainExp) {
+      for (auto &x : _mainExp) {
         allPositions++;
-        ExpEntryEx* exp = x.second;
+        ExpEntryEx *exp = x.second;
 
         // Scale counts (exactly as HypnoS)
         uint16_t maxCount = std::numeric_limits<uint8_t>::min();
-        ExpEntryEx* exp1 = exp;
+        ExpEntryEx *exp1 = exp;
         while (exp1) {
           maxCount = std::max(maxCount, exp1->count);
           exp1 = exp1->next;
@@ -329,7 +331,8 @@ private:
         const uint16_t scale = 1 + maxCount / 128;
         exp1 = exp;
         while (exp1) {
-          exp1->count = std::max(static_cast<uint16_t>(exp1->count / scale), static_cast<uint16_t>(1));
+          exp1->count = std::max(static_cast<uint16_t>(exp1->count / scale),
+                                 static_cast<uint16_t>(1));
           exp1 = exp1->next;
         }
 
@@ -356,18 +359,20 @@ private:
       seen.set_empty_key(EmptyKey);
       seen.set_deleted_key(DeletedKey);
 
-      // NOTE: do NOT cast e->move; read its raw bytes instead (exactly as HypnoS)
-      auto km_hash = [](const ExpEntryEx* e) -> uint64_t {
+      // NOTE: do NOT cast e->move; read its raw bytes instead (exactly as
+      // HypnoS)
+      auto km_hash = [](const ExpEntryEx *e) -> uint64_t {
         uint64_t mv = 0;
-        const size_t n = (sizeof(mv) < sizeof(e->move)) ? sizeof(mv) : sizeof(e->move);
+        const size_t n =
+            (sizeof(mv) < sizeof(e->move)) ? sizeof(mv) : sizeof(e->move);
         std::memcpy(&mv, &e->move, n);
         return static_cast<uint64_t>(e->key) ^ (mv * 0x9E3779B185EBCA87ULL);
       };
 
       size_t pvWritten = 0, mpvWritten = 0;
 
-      for (auto* const expList : {&_newPvExp, &_newMultiPvExp}) {
-        for (const ExpEntryEx* exp : *expList) {
+      for (auto *const expList : {&_newPvExp, &_newMultiPvExp}) {
+        for (const ExpEntryEx *exp : *expList) {
           if (exp->depth < static_cast<int32_t>(MinDepth))
             continue;
 
@@ -389,9 +394,8 @@ private:
         }
       }
 
-      std::cout << "info string Saved " << pvWritten << " PV and "
-                << mpvWritten << " MultiPV entries to experience file: " << fn
-                << std::endl;
+      std::cout << "info string Saved " << pvWritten << " PV and " << mpvWritten
+                << " MultiPV entries to experience file: " << fn << std::endl;
     }
 
     write_entry(nullptr, true);
@@ -413,7 +417,7 @@ public:
     return !_newPvExp.empty() || !_newMultiPvExp.empty();
   }
 
-  bool load(const std::string& filename, bool synchronous) {
+  bool load(const std::string &filename, bool synchronous) {
     wait_for_load_finished();
 
     _filename = filename;
@@ -427,7 +431,7 @@ public:
         const bool loadingResult = _load(filename);
         _loadingResult.store(loadingResult, std::memory_order_relaxed);
 
-        std::thread* t = _loaderThread;
+        std::thread *t = _loaderThread;
         _loaderThread = nullptr;
 
         {
@@ -454,7 +458,7 @@ public:
     return _loadingResult.load(std::memory_order_relaxed);
   }
 
-  void save(const std::string& fn, bool saveAll, bool ignoreLoadingCheck) {
+  void save(const std::string &fn, bool saveAll, bool ignoreLoadingCheck) {
     if (!ignoreLoadingCheck)
       wait_for_load_finished();
 
@@ -493,7 +497,7 @@ public:
     }
   }
 
-  const ExpEntryEx* probe(uint64_t k) const {
+  const ExpEntryEx *probe(uint64_t k) const {
     auto itr = _mainExp.find(k);
     if (itr == _mainExp.end())
       return nullptr;
@@ -503,7 +507,7 @@ public:
   }
 
   void add_pv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
-    auto* exp = new ExpEntryEx(k, m, v, d, 1);
+    auto *exp = new ExpEntryEx(k, m, v, d, 1);
     if (exp) {
       _newPvExp.emplace_back(exp);
       link_entry(exp);
@@ -511,7 +515,7 @@ public:
   }
 
   void add_multipv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
-    auto* exp = new ExpEntryEx(k, m, v, d, 1);
+    auto *exp = new ExpEntryEx(k, m, v, d, 1);
     if (exp) {
       _newMultiPvExp.emplace_back(exp);
       link_entry(exp);
@@ -520,7 +524,7 @@ public:
 };
 
 // Global experience state
-ExperienceData* currentExperience = nullptr;
+ExperienceData *currentExperience = nullptr;
 bool experienceEnabled = true;
 bool experienceReadonly = false;
 bool learningPaused = false;
@@ -538,7 +542,8 @@ void touch() {
     return;
 
   std::fstream out;
-  out.open(experienceFilename, std::ios::out | std::ios::binary | std::ios::app);
+  out.open(experienceFilename,
+           std::ios::out | std::ios::binary | std::ios::app);
   if (!out.is_open())
     return;
 
@@ -585,14 +590,14 @@ void unload() {
 void save() {
   if (!currentExperience || !currentExperience->has_new_exp())
     return;
-  
+
   if (experienceReadonly)
     return;
 
   currentExperience->save(currentExperience->filename(), false, false);
 }
 
-const ExpEntryEx* probe(uint64_t k) {
+const ExpEntryEx *probe(uint64_t k) {
   assert(experienceEnabled);
   if (!currentExperience)
     return nullptr;
@@ -600,9 +605,9 @@ const ExpEntryEx* probe(uint64_t k) {
   return currentExperience->probe(k);
 }
 
-const ExpEntryEx* find_best_entry(uint64_t k) {
-  const ExpEntryEx* bestEntry = nullptr;
-  const ExpEntryEx* currentEntry = probe(k);
+const ExpEntryEx *find_best_entry(uint64_t k) {
+  const ExpEntryEx *bestEntry = nullptr;
+  const ExpEntryEx *currentEntry = probe(k);
 
   while (currentEntry) {
     if (!bestEntry || currentEntry->compare(bestEntry) > 0)
@@ -622,14 +627,12 @@ void set_experience_enabled(bool enabled) {
   }
 }
 
-void set_experience_file(const std::string& filename) {
+void set_experience_file(const std::string &filename) {
   experienceFilename = filename;
   init();
 }
 
-void set_experience_readonly(bool readonly) {
-  experienceReadonly = readonly;
-}
+void set_experience_readonly(bool readonly) { experienceReadonly = readonly; }
 
 void wait_for_loading_finished() {
   if (!currentExperience)
@@ -643,7 +646,8 @@ void resume_learning() { learningPaused = false; }
 bool is_learning_paused() { return learningPaused; }
 
 void add_pv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
-  if (!currentExperience || !experienceEnabled || learningPaused)
+  if (!currentExperience || !experienceEnabled || learningPaused ||
+      experienceReadonly)
     return;
 
   // Bench: allow ONE single write (single-shot), then block all subsequent
@@ -658,7 +662,7 @@ void add_pv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
 
 void add_multipv_experience(uint64_t k, uint16_t m, int32_t v, uint8_t d) {
   if (!currentExperience || g_benchMode.load(std::memory_order_relaxed) ||
-      !experienceEnabled || learningPaused)
+      !experienceEnabled || learningPaused || experienceReadonly)
     return;
 
   currentExperience->add_multipv_experience(k, m, v, d);
@@ -678,7 +682,8 @@ void set_experience_book_eval_importance(int importance) {
 }
 
 void set_experience_book_min_depth(int depth) {
-  experienceBookMinDepth = std::max(static_cast<int>(MinDepth), std::min(64, depth));
+  experienceBookMinDepth =
+      std::max(static_cast<int>(MinDepth), std::min(64, depth));
 }
 
 void set_experience_book_max_moves(int moves) {
@@ -686,32 +691,24 @@ void set_experience_book_max_moves(int moves) {
 }
 
 // Experience Book option getters
-bool get_experience_book_enabled() {
-  return experienceBookEnabled;
-}
+bool get_experience_book_enabled() { return experienceBookEnabled; }
 
-int get_experience_book_width() {
-  return experienceBookWidth;
-}
+int get_experience_book_width() { return experienceBookWidth; }
 
 int get_experience_book_eval_importance() {
   return experienceBookEvalImportance;
 }
 
-int get_experience_book_min_depth() {
-  return experienceBookMinDepth;
-}
+int get_experience_book_min_depth() { return experienceBookMinDepth; }
 
-int get_experience_book_max_moves() {
-  return experienceBookMaxMoves;
-}
+int get_experience_book_max_moves() { return experienceBookMaxMoves; }
 
 //=============================================================================
 // Utility Commands: defrag, merge, show_exp
 //=============================================================================
 
 // Helper function to strip quotes from filename
-static std::string unquote(const std::string& s) {
+static std::string unquote(const std::string &s) {
   if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
     return s.substr(1, s.size() - 2);
   return s;
@@ -719,29 +716,29 @@ static std::string unquote(const std::string& s) {
 
 // Defrag command: defragments an experience file
 // Usage: defrag [filename] (if no filename, uses Experience File option)
-void defrag(const std::string& filename) {
+void defrag(const std::string &filename) {
   wait_for_loading_finished();
-  
+
   std::string fn = unquote(filename);
-  
+
   // If no filename provided, use the "Experience File" option (like HypnoS)
   if (fn.empty()) {
     fn = experienceFilename;
     if (fn.empty()) {
-      fn = "patricia.exp";  // Default fallback
+      fn = "patricia.exp"; // Default fallback
     }
   }
-  
+
   printf("\nDefragmenting experience file: %s\n", fn.c_str());
-  
+
   // Create a temporary ExperienceData to load and re-save
   ExperienceData exp;
-  
+
   if (!exp.load(fn, true)) {
     printf("info string Error: Failed to load experience file\n");
     return;
   }
-  
+
   // Save defragmented file
   exp.save(fn, true, false);
   printf("info string Defragmentation complete\n");
@@ -749,44 +746,46 @@ void defrag(const std::string& filename) {
 
 // Merge command: merges multiple experience files into one
 // Usage: merge <target_file> <source_file1> [source_file2] ...
-void merge(const std::vector<std::string>& filenames) {
+void merge(const std::vector<std::string> &filenames) {
   wait_for_loading_finished();
-  
+
   if (filenames.size() < 2) {
     printf("info string Error: Incorrect merge command\n");
-    printf("info string Syntax: merge <target_file> <source_file1> [source_file2] ...\n");
+    printf("info string Syntax: merge <target_file> <source_file1> "
+           "[source_file2] ...\n");
     printf("info string The first <target_file> is the destination file\n");
-    printf("info string The files <source_file1> ... are the experience files to merge\n");
+    printf("info string The files <source_file1> ... are the experience files "
+           "to merge\n");
     return;
   }
-  
+
   // Collect unquoted filenames
   std::vector<std::string> files;
-  for (const auto& fn : filenames) {
+  for (const auto &fn : filenames) {
     files.push_back(unquote(fn));
   }
-  
+
   std::string targetFilename = files.front();
-  
+
   printf("info string Merging experience files:\n");
-  for (const auto& fn : files) {
+  for (const auto &fn : files) {
     printf("info string   %s\n", fn.c_str());
   }
   printf("info string Target file: %s\n", targetFilename.c_str());
-  
+
   // Load and merge all files
   ExperienceData exp;
-  
-  for (const auto& fn : files) {
+
+  for (const auto &fn : files) {
     exp.load(fn, true);
   }
-  
+
   // Save merged file
   exp.save(targetFilename, true, false);
   printf("info string Merge complete\n");
 }
 
-// show_exp implementation moved to uci.h to avoid LTO multiple definition errors
+// show_exp implementation moved to uci.h to avoid LTO multiple definition
+// errors
 
 } // namespace Learning
-
