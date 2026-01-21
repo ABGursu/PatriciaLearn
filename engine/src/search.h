@@ -3200,7 +3200,8 @@ finish:
       int effDepth = thread_info.current_iter;
       if (thread_info.max_iter_depth > 0 &&
           thread_info.max_iter_depth < MaxSearchDepth) {
-        effDepth = std::max(effDepth, thread_info.max_iter_depth);
+        effDepth =
+            std::max(effDepth, static_cast<int>(thread_info.max_iter_depth));
       }
 
       if (effDepth >= static_cast<int>(Learning::MinDepth)) {
