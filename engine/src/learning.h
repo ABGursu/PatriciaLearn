@@ -184,7 +184,7 @@ struct ExpEntryEx : ExpEntry {
 
         // Draw detection after move (like HypnoS: pos.is_draw(pos.game_ply()))
         if constexpr (!std::is_same_v<IsDrawFunc, std::nullptr_t>) {
-          if (!maybeDraw && is_draw_fn != nullptr) {
+          if (!maybeDraw) {
             maybeDraw = is_draw_fn(pos);
           }
         }
@@ -229,11 +229,9 @@ struct ExpEntryEx : ExpEntry {
       // Shallow draw detection when evalImportance is zero (like HypnoS)
       // Make the move and check for draw
       if constexpr (!std::is_same_v<IsDrawFunc, std::nullptr_t>) {
-        if (is_draw_fn != nullptr) {
-          TPosition tempPos = pos;
-          make_move_fn(tempPos, static_cast<uint16_t>(move));
-          maybeDraw = is_draw_fn(tempPos);
-        }
+        TPosition tempPos = pos;
+        make_move_fn(tempPos, static_cast<uint16_t>(move));
+        maybeDraw = is_draw_fn(tempPos);
       }
     }
 
