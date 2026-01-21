@@ -3186,17 +3186,28 @@ finish:
   search_end_barrier.arrive_and_wait();
 
   // Save experience data (PV and MultiPV) - AFTER barrier to avoid race
-  // condition
+  // condition. Matches HypnoS conditions exactly.
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
-      !Learning::is_learning_paused() && Learning::enabled()) {
+      !Learning::is_learning_paused() && Learning::enabled() &&
+      !thread_data.is_frc &&   // Don't save for Chess960 (like HypnoS)
+      !thread_info.is_human) { // Don't save for Skill Level mode (like HypnoS
+                               // UCI_LimitStrength)
     // Save PV experience
     if (!thread_info.best_moves.empty() &&
-        thread_info.best_moves[0] != MoveNone &&
-        thread_info.current_iter >= static_cast<int>(Learning::MinDepth)) {
-      uint8_t effDepth = static_cast<uint8_t>(thread_info.current_iter);
-      Learning::add_pv_experience(position.zobrist_key,
-                                  thread_info.best_moves[0],
-                                  thread_info.best_scores[0], effDepth);
+        thread_info.best_moves[0] != MoveNone) {
+      // Depth fallback: if GUI requested fixed depth, use that as fallback
+      // (like HypnoS limits.depth fallback)
+      int effDepth = thread_info.current_iter;
+      if (thread_info.max_iter_depth > 0 &&
+          thread_info.max_iter_depth < MaxSearchDepth) {
+        effDepth = std::max(effDepth, thread_info.max_iter_depth);
+      }
+
+      if (effDepth >= static_cast<int>(Learning::MinDepth)) {
+        Learning::add_pv_experience(
+            position.zobrist_key, thread_info.best_moves[0],
+            thread_info.best_scores[0], static_cast<uint8_t>(effDepth));
+      }
     }
 
     // Save MultiPV experience (collect from all threads)
