@@ -3177,7 +3177,16 @@ void iterative_deepen(
   }
 
 finish:
-  // Save experience data (PV and MultiPV)
+  // wait for all threads to finish searching BEFORE saving experience
+  // (matches HypnoS: threads.wait_for_search_finished() before
+  // add_pv_experience)
+  if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
+    thread_data.stop = true;
+  }
+  search_end_barrier.arrive_and_wait();
+
+  // Save experience data (PV and MultiPV) - AFTER barrier to avoid race
+  // condition
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       !Learning::is_learning_paused() && Learning::enabled()) {
     // Save PV experience
@@ -3244,12 +3253,6 @@ finish:
     Learning::save();
   }
 
-  // wait for all threads to finish searching
-  // printf("%i\n", thread_info.thread_id);
-  if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
-    thread_data.stop = true;
-  }
-  search_end_barrier.arrive_and_wait();
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       !thread_info.is_human) {
     printf("bestmove %s\n",
