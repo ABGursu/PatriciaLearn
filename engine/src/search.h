@@ -2908,7 +2908,7 @@ void iterative_deepen(
         if (temp->depth >= static_cast<int32_t>(expBookMinDepth)) {
           // Use positional quality with lookahead and draw detection (like
           // HypnoS) - now uses full is_draw with repetition detection
-          auto [q, maybeDraw] = temp->quality_positional(
+          auto [q, maybeDraw] = temp->quality(
               position, evalImportance,
               [](Position &pos, uint16_t mv) {
                 make_move(pos, static_cast<Move>(mv));

@@ -138,41 +138,17 @@ struct ExpEntryEx : ExpEntry {
                       uint16_t c = 1)
       : ExpEntry(k, m, v, d, c), next(nullptr) {}
 
-  // Simple quality calculation (non-positional, for basic sorting)
-  // Matches HypnoS logic: count weighted by (10-evalImportance), value weighted
-  // by evalImportance
-  int quality(int evalImportance = 5) const {
-    constexpr int QualityEvalImportanceMax = 10;
-
-    // Quality based on move count (weight decreases as evalImportance
-    // increases)
-    int q =
-        static_cast<int>(count) * (QualityEvalImportanceMax - evalImportance);
-
-    // Quality based on evaluation (like HypnoS: value contributes
-    // proportionally to evalImportance)
-    if (evalImportance > 0) {
-      // Use value directly scaled by evalImportance (matches HypnoS
-      // calculation)
-      q += value * evalImportance / QualityEvalImportanceMax;
-    }
-
-    return q / QualityEvalImportanceMax;
-  }
-
-  // Positional quality calculation with lookahead (like HypnoS)
+  // Quality calculation with lookahead (exactly like HypnoS)
   // Returns {quality_score, maybe_draw}
   // pos: current position (will be copied for lookahead, not modified)
   // evalImportance: 0-10, higher = more weight on evaluation differences
   // MakeMoveFunc: function to apply move to position (e.g., make_move)
-  // IsDrawFunc: optional function to check if position is a draw (e.g.,
-  // is_repetition)
+  // IsDrawFunc: optional function to check if position is a draw
   template <typename TPosition, typename MakeMoveFunc,
             typename IsDrawFunc = std::nullptr_t>
-  std::pair<int, bool>
-  quality_positional(TPosition pos, int evalImportance,
-                     MakeMoveFunc make_move_fn,
-                     IsDrawFunc is_draw_fn = nullptr) const {
+  std::pair<int, bool> quality(TPosition pos, int evalImportance,
+                               MakeMoveFunc make_move_fn,
+                               IsDrawFunc is_draw_fn = nullptr) const {
     constexpr int QualityEvalImportanceMax = 10;
     constexpr int QualityExperienceMovesAhead = 10;
 
@@ -195,22 +171,27 @@ struct ExpEntryEx : ExpEntry {
       const ExpEntryEx *temp1 = this;
       int moveCount = 0;
 
-      while (temp1 && moveCount < QualityExperienceMovesAhead) {
+      // Loop like HypnoS: while(true) with break conditions inside
+      while (true) {
+        // To be used later
         lastExp[me] = temp1;
 
-        // Apply move to position copy
+        // Do the move
         uint16_t mv = static_cast<uint16_t>(temp1->move);
         make_move_fn(pos, mv);
         me ^= 1;
         ++moveCount;
 
         // Draw detection after move (like HypnoS: pos.is_draw(pos.game_ply()))
-        // If is_draw_fn is provided, use it to detect draws
         if constexpr (!std::is_same_v<IsDrawFunc, std::nullptr_t>) {
-          if (!maybeDraw) {
+          if (!maybeDraw && is_draw_fn != nullptr) {
             maybeDraw = is_draw_fn(pos);
           }
         }
+
+        // Check move count AFTER move and draw detection (like HypnoS)
+        if (moveCount >= QualityExperienceMovesAhead)
+          break;
 
         // Probe next position
         temp1 = probe(pos.zobrist_key);
@@ -225,12 +206,14 @@ struct ExpEntryEx : ExpEntry {
           temp2 = temp2->next;
         }
 
+        // Calculate sum/weight for this side (like HypnoS)
         if (lastExp[me]) {
           sum[me] += static_cast<int64_t>(temp1->value - lastExp[me]->value);
           ++weight[me];
         }
       }
 
+      // Calculate quality
       int64_t s = sum[us];
       int64_t w = weight[us];
 
@@ -244,11 +227,13 @@ struct ExpEntryEx : ExpEntry {
       }
     } else {
       // Shallow draw detection when evalImportance is zero (like HypnoS)
-      // Make the move and check for draw, then undo
+      // Make the move and check for draw
       if constexpr (!std::is_same_v<IsDrawFunc, std::nullptr_t>) {
-        TPosition tempPos = pos;
-        make_move_fn(tempPos, static_cast<uint16_t>(move));
-        maybeDraw = is_draw_fn(tempPos);
+        if (is_draw_fn != nullptr) {
+          TPosition tempPos = pos;
+          make_move_fn(tempPos, static_cast<uint16_t>(move));
+          maybeDraw = is_draw_fn(tempPos);
+        }
       }
     }
 

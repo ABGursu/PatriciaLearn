@@ -7,7 +7,6 @@
 #include <memory>
 #include <thread>
 
-
 constexpr std::array<int, 20> skill_levels = {
     500,  800,  1000, 1200, 1300, 1400, 1500, 1600, 1700, 1800,
     1900, 2000, 2100, 2200, 2300, 2400, 2500, 2650, 2800, 3000};
@@ -808,7 +807,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
           std::vector<std::pair<const Learning::ExpEntryEx *, int>> qualityList;
           for (const Learning::ExpEntryEx *t = head; t; t = t->next) {
             // Use positional quality with lookahead (like HypnoS)
-            auto [q, maybeDraw] = t->quality_positional(
+            auto [q, maybeDraw] = t->quality(
                 position, evalImportance, [](Position &pos, uint16_t mv) {
                   make_move(pos, static_cast<Move>(mv));
                 });
@@ -886,7 +885,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
           std::vector<std::pair<const Learning::ExpEntryEx *, int>> qualityList;
           for (const Learning::ExpEntryEx *t = head; t; t = t->next) {
             // Use positional quality with lookahead (like HypnoS)
-            auto [q, maybeDraw] = t->quality_positional(
+            auto [q, maybeDraw] = t->quality(
                 position, evalImportance, [](Position &pos, uint16_t mv) {
                   make_move(pos, static_cast<Move>(mv));
                 });
