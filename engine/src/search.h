@@ -13,7 +13,6 @@
 #include <mutex>
 #include <random>
 
-
 constexpr int NormalizationFactor = 195;
 
 // ============================================================================
@@ -2908,16 +2907,19 @@ void iterative_deepen(
       while (temp) {
         if (temp->depth >= static_cast<int32_t>(expBookMinDepth)) {
           // Use positional quality with lookahead and draw detection (like
-          // HypnoS)
+          // HypnoS) - now uses full is_draw with repetition detection
           auto [q, maybeDraw] = temp->quality_positional(
               position, evalImportance,
               [](Position &pos, uint16_t mv) {
                 make_move(pos, static_cast<Move>(mv));
               },
-              [](const Position &pos) {
-                // Simple draw detection: material draw + 50-move rule
-                // approximation
-                return material_draw(pos) || pos.halfmoves >= 100;
+              [&thread_info](const Position &pos) {
+                // Full draw detection: 50-move rule, material draw, AND
+                // repetition (matches HypnoS pos.is_draw())
+                // Note: We need to use a non-const copy for is_draw
+                Position tempPos = pos;
+                ThreadInfo tempThreadInfo = thread_info;
+                return is_draw(tempPos, tempThreadInfo);
               });
           if (q > 0 && !maybeDraw) {
             qualityList.emplace_back(temp, q);

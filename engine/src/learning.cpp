@@ -13,14 +13,31 @@
 
 namespace Learning {
 
-// Wrapper class for google::dense_hash_map with automatic empty/deleted key
-// setup
+// Custom Hash functor for Zobrist keys (matches HypnoS KeyHasher)
+// Masks to 32-bits for better hash distribution with 64-bit Zobrist keys
+struct KeyHasher {
+  // Hash operator - mask to lower 32 bits
+  constexpr size_t operator()(const uint64_t &key) const {
+    return static_cast<size_t>(key & 0x00000000FFFFFFFFULL);
+  }
+
+  // Compare operator
+  constexpr bool operator()(const uint64_t &key1, const uint64_t &key2) const {
+    return key1 == key2;
+  }
+};
+
+// Wrapper class for google::dense_hash_map with custom hasher and automatic
+// empty/deleted key setup (matches HypnoS SugaRMap)
 template <typename TKey, typename TVal>
-class ExpHashMap : public google::dense_hash_map<TKey, TVal> {
+class ExpHashMap
+    : public google::dense_hash_map<TKey, TVal, KeyHasher, KeyHasher> {
 public:
   ExpHashMap() {
-    google::dense_hash_map<TKey, TVal>::set_empty_key(EmptyKey);
-    google::dense_hash_map<TKey, TVal>::set_deleted_key(DeletedKey);
+    google::dense_hash_map<TKey, TVal, KeyHasher, KeyHasher>::set_empty_key(
+        EmptyKey);
+    google::dense_hash_map<TKey, TVal, KeyHasher, KeyHasher>::set_deleted_key(
+        DeletedKey);
   }
 };
 
@@ -123,6 +140,36 @@ private:
 
       exp2 = exp2->next;
     } while (true);
+  }
+
+  // Link entry without quality impact (for mergenq command)
+  // - New entries get count=0
+  // - Existing entries use merge_nq (updates depth/value, preserves count)
+  bool link_entry_nq(ExpEntryEx *exp) {
+    auto itr = _mainExp.find(exp->key);
+
+    // If new entry: insert with count=0 (no quality impact)
+    if (itr == _mainExp.end()) {
+      exp->count = 0; // No quality impact for new entries
+      _mainExp[exp->key] = exp;
+      return true;
+    }
+
+    // If existing entry and same move exists: merge without quality impact
+    ExpEntryEx *exp2 = itr->second->find(static_cast<uint16_t>(exp->move));
+    if (exp2) {
+      exp2->merge_nq(exp); // Updates depth/value, preserves count
+      return false;
+    }
+
+    // If existing entry and different move: insert at end with count=0
+    exp->count = 0; // No quality impact for new entries
+    exp2 = itr->second;
+    while (exp2->next) {
+      exp2 = exp2->next;
+    }
+    exp2->next = exp;
+    return true;
   }
 
   bool _load(const std::string &fn) {
@@ -253,6 +300,120 @@ private:
                 << ". Fragmentation: " << std::fixed << std::setprecision(2)
                 << frag << "%" << std::endl;
     }
+
+    return true;
+  }
+
+  // Load experience file without quality impact (for mergenq command)
+  // Uses link_entry_nq which sets count=0 for new entries and preserves count
+  // for existing
+  bool _load_nq(const std::string &fn) {
+    std::ifstream in(fn, std::ios::in | std::ios::binary | std::ios::ate);
+
+    if (!in.is_open()) {
+      std::cout << "info string Could not open experience file: " << fn
+                << std::endl;
+      return false;
+    }
+
+    const size_t inSize = in.tellg();
+
+    if (inSize == 0) {
+      std::cout << "info string The experience file [" << fn << "] is empty"
+                << std::endl;
+      return false;
+    }
+
+    // Check signature (accept both PatriciaLearn and HypnoS signatures)
+    in.seekg(0, std::ios::beg);
+    char sigBuffer[256];
+    const size_t sigLen = strlen(ExperienceSignature);
+    constexpr const char *HypnoSSignature = "SugaR Experience version 2";
+    const size_t hypnoSSigLen = strlen(HypnoSSignature);
+    const size_t maxSigLen = std::max(sigLen, hypnoSSigLen);
+
+    if (inSize < maxSigLen) {
+      std::cout << "info string The file [" << fn
+                << "] is not a valid experience file" << std::endl;
+      return false;
+    }
+
+    if (!in.read(sigBuffer, maxSigLen)) {
+      std::cout << "info string Failed to read signature from [" << fn << "]"
+                << std::endl;
+      return false;
+    }
+
+    bool isPatriciaSig = (memcmp(sigBuffer, ExperienceSignature, sigLen) == 0);
+    bool isHypnoSSig = (inSize >= hypnoSSigLen &&
+                        memcmp(sigBuffer, HypnoSSignature, hypnoSSigLen) == 0);
+
+    if (!isPatriciaSig && !isHypnoSSig) {
+      std::cout << "info string The file [" << fn
+                << "] is not a valid experience file" << std::endl;
+      return false;
+    }
+
+    const size_t actualSigLen = isPatriciaSig ? sigLen : hypnoSSigLen;
+    in.seekg(static_cast<std::streamoff>(actualSigLen), std::ios::beg);
+
+    const size_t entriesDataLength = inSize - actualSigLen;
+    const size_t expCount = entriesDataLength / sizeof(ExpEntry);
+
+    if (expCount * sizeof(ExpEntry) != entriesDataLength) {
+      std::cout << "info string The file [" << fn
+                << "] has invalid size (not multiple of entry size)"
+                << std::endl;
+      return false;
+    }
+
+    auto *expData =
+        static_cast<ExpEntryEx *>(malloc(expCount * sizeof(ExpEntryEx)));
+
+    if (!expData) {
+      std::cerr << "info string Failed to allocate "
+                << expCount * sizeof(ExpEntryEx)
+                << " bytes for experience data from file [" << fn << "]"
+                << std::endl;
+      return false;
+    }
+
+    const size_t prevPosCount = _mainExp.size();
+    size_t duplicateMoves = 0;
+    size_t newMoves = 0;
+    ExpEntryEx *exp = expData;
+
+    for (size_t i = 0; i < expCount; ++i, ++exp) {
+      if (_abortLoading.load(std::memory_order_relaxed))
+        break;
+
+      exp->next = nullptr;
+
+      if (!in.read(reinterpret_cast<char *>(exp), sizeof(ExpEntry))) {
+        std::cout << "info string Failed to read experience entry #" << i + 1
+                  << " of " << expCount << std::endl;
+        free(expData);
+        return false;
+      }
+
+      // Link entry without quality impact
+      if (!link_entry_nq(exp))
+        duplicateMoves++; // Existing entry was updated (count preserved)
+      else
+        newMoves++; // New entry added with count=0
+    }
+
+    in.close();
+    _expData.push_back(expData);
+
+    if (_abortLoading.load(std::memory_order_relaxed))
+      return false;
+
+    std::cout << "info string " << fn
+              << " (no quality) -> New moves: " << newMoves
+              << ". Updated moves: " << duplicateMoves
+              << ". New positions: " << (_mainExp.size() - prevPosCount)
+              << std::endl;
 
     return true;
   }
@@ -446,6 +607,13 @@ public:
     }
 
     return !synchronous || wait_for_load_finished();
+  }
+
+  // Load experience file without quality impact (synchronous only)
+  // New entries get count=0, existing entries preserve count
+  bool load_nq(const std::string &filename) {
+    wait_for_load_finished();
+    return _load_nq(filename);
   }
 
   bool wait_for_load_finished() {
@@ -787,5 +955,53 @@ void merge(const std::vector<std::string> &filenames) {
 
 // show_exp implementation moved to uci.h to avoid LTO multiple definition
 // errors
+
+// Mergenq command: merges experience files without quality impact
+// - First file (target) is loaded normally
+// - Additional files are loaded with count=0 for new entries
+// - Existing entries have depth/value updated but count preserved
+// Usage: mergenq <target_file> <source_file1> [source_file2] ...
+void mergenq(const std::vector<std::string> &filenames) {
+  wait_for_loading_finished();
+
+  if (filenames.size() < 2) {
+    printf("info string Error: Incorrect mergenq command\n");
+    printf("info string Syntax: mergenq <target_file> <source_file1> "
+           "[source_file2] ...\n");
+    printf("info string The first <target_file> is the destination file\n");
+    printf("info string Source files are merged WITHOUT quality impact\n");
+    printf("info string - New positions: added with count=0\n");
+    printf("info string - Existing positions: depth/value updated, count "
+           "preserved\n");
+    return;
+  }
+
+  // Collect unquoted filenames
+  std::vector<std::string> files;
+  for (const auto &fn : filenames) {
+    files.push_back(unquote(fn));
+  }
+
+  std::string targetFilename = files.front();
+
+  printf("info string Merging experience files (no quality impact):\n");
+  for (const auto &fn : files) {
+    printf("info string   %s\n", fn.c_str());
+  }
+  printf("info string Target file: %s\n", targetFilename.c_str());
+
+  // Load target file first with normal quality
+  ExperienceData exp;
+  exp.load(files[0], true);
+
+  // Load additional files without quality impact
+  for (size_t i = 1; i < files.size(); i++) {
+    exp.load_nq(files[i]);
+  }
+
+  // Save merged file
+  exp.save(targetFilename, true, false);
+  printf("info string Merge (no quality) complete\n");
+}
 
 } // namespace Learning

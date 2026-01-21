@@ -86,6 +86,19 @@ struct ExpEntry {
     }
   }
 
+  // Merge without quality impact: update depth/value but preserve count
+  void merge_nq(const ExpEntry *exp) {
+    // DO NOT merge count - preserve original quality
+    // Only update value/depth if 'exp' has better depth
+    if (depth == exp->depth) {
+      value = (value + exp->value) / 2;
+    } else if (depth < exp->depth) {
+      value = exp->value;
+      depth = exp->depth;
+    }
+    // count unchanged - no quality impact
+  }
+
   int compare(const ExpEntry *exp) const {
     static constexpr int DepthScale = 10;
     static constexpr int CountScale = 3;
@@ -303,10 +316,11 @@ extern std::atomic<bool> g_benchSingleShot;
 
 void touch();
 
-// Utility commands (defrag, merge)
+// Utility commands (defrag, merge, mergenq)
 // Note: exp and expex commands are implemented in uci.h to avoid LTO multiple
 // definition errors
 void defrag(const std::string &filename);
 void merge(const std::vector<std::string> &filenames);
+void mergenq(const std::vector<std::string> &filenames);
 
 } // namespace Learning

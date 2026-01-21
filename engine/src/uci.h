@@ -2,10 +2,11 @@
 #include "human.h"
 #include "learning.h"
 #include "search.h"
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <thread>
-#include <chrono>
+
 
 constexpr std::array<int, 20> skill_levels = {
     500,  800,  1000, 1200, 1300, 1400, 1500, 1600, 1700, 1800,
@@ -169,7 +170,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
   // Debug logging is disabled by default (controlled by UCI option)
   // Debug::init() will be called when user enables "Debug Logging" option
 
-  printf("Patricia Chess Engine 5.2, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
+  printf("Patricia Chess Engine 5.2, written by Adam Kulju, edited by A. B. "
+         "Gursu\n\n\n");
 
   // Initialize Learning system (load experience file)
   Learning::init();
@@ -201,14 +203,16 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     if (command == "quit") {
       // CRITICAL FIX: Stop all searches first, then terminate threads
-      // This prevents threads from getting stuck in deep search when Fortress Detection is enabled
+      // This prevents threads from getting stuck in deep search when Fortress
+      // Detection is enabled
       thread_data.stop = true;
       thread_data.terminate = true;
 
-      // IMPORTANT: Wait for main search thread to finish so Learning::save() can complete
-      // Learning::save() is called at the end of iterative_deepen in the main search thread
+      // IMPORTANT: Wait for main search thread to finish so Learning::save()
+      // can complete Learning::save() is called at the end of iterative_deepen
+      // in the main search thread
       if (s.joinable()) {
-        s.join();  // Wait for search to finish and save learning data
+        s.join(); // Wait for search to finish and save learning data
       }
 
       // Try to synchronize with barriers, but don't wait forever
@@ -226,42 +230,46 @@ void uci(ThreadInfo &thread_info, Position &position) {
           thread_data.threads[i].detach();
         }
       }
-      
-      // Save learning data one final time (in case it wasn't saved during search)
+
+      // Save learning data one final time (in case it wasn't saved during
+      // search)
       Learning::save();
-      
+
       // Clear thread vectors
       thread_data.thread_infos.clear();
       thread_data.threads.clear();
-      
+
       Debug::close();
-      
+
       std::exit(0);
     }
 
     else if (command == "uci") {
-      printf("id name Patricia 5.2\n"
-             "id author Adam Kulju\n"
-             "option name Hash type spin default 32 min 1 max 131072\n"
-             "option name Threads type spin default 1 min 1 max 1024\n"
-             "option name SyzygyPath type string default null\n"
-             "option name MultiPV type spin default 1 min 1 max 255\n"
-             "option name Skill_Level type spin default 21 min 1 max 21\n"
-             "option name UCI_Chess960 type check default false\n"
-             "option name Experience Enabled type check default true\n"
-             "option name Experience File type string default patricia.exp\n"
-             "option name Experience Readonly type check default false\n"
-             "option name Experience Book type check default false\n"
-             "option name Experience Book Width type spin default 1 min 1 max 20\n"
-             "option name Experience Book Eval Importance type spin default 5 min 0 max 10\n"
-             "option name Experience Book Min Depth type spin default 27 min 4 max 64\n"
-             "option name Experience Book Max Moves type spin default 16 min 1 max 100\n"
-             "option name Fortress Detection type check default false\n"
-             "option name Armageddon type check default false\n"
-             "option name Armageddon Psychology type check default false\n"
-             "option name Armageddon TB Penalty type check default false\n"
-             "option name Debug Logging type check default false\n"
-);
+      printf(
+          "id name Patricia 5.2\n"
+          "id author Adam Kulju\n"
+          "option name Hash type spin default 32 min 1 max 131072\n"
+          "option name Threads type spin default 1 min 1 max 1024\n"
+          "option name SyzygyPath type string default null\n"
+          "option name MultiPV type spin default 1 min 1 max 255\n"
+          "option name Skill_Level type spin default 21 min 1 max 21\n"
+          "option name UCI_Chess960 type check default false\n"
+          "option name Experience Enabled type check default true\n"
+          "option name Experience File type string default patricia.exp\n"
+          "option name Experience Readonly type check default false\n"
+          "option name Experience Book type check default false\n"
+          "option name Experience Book Width type spin default 1 min 1 max 20\n"
+          "option name Experience Book Eval Importance type spin default 5 min "
+          "0 max 10\n"
+          "option name Experience Book Min Depth type spin default 27 min 4 "
+          "max 64\n"
+          "option name Experience Book Max Moves type spin default 16 min 1 "
+          "max 100\n"
+          "option name Fortress Detection type check default false\n"
+          "option name Armageddon type check default false\n"
+          "option name Armageddon Psychology type check default false\n"
+          "option name Armageddon TB Penalty type check default false\n"
+          "option name Debug Logging type check default false\n");
 
       /*for (auto &param : params) {
         std::cout << "option name " << param.name << " type spin default "
@@ -286,27 +294,35 @@ void uci(ThreadInfo &thread_info, Position &position) {
       std::string name;
       int value;
       input_stream >> command; // "name"
-      
+
       // Read multi-word option name until "value" keyword
       std::string word;
       while (input_stream >> word && word != "value") {
-        if (!name.empty()) name += " ";
+        if (!name.empty())
+          name += " ";
         name += word;
       }
-      
-      // Normalize option name: trim leading/trailing spaces (for ChessBase compatibility)
-      // Remove any extra spaces that ChessBase might add
-      while (!name.empty() && name[0] == ' ') name.erase(0, 1);
-      while (!name.empty() && name.back() == ' ') name.pop_back();
-      
+
+      // Normalize option name: trim leading/trailing spaces (for ChessBase
+      // compatibility) Remove any extra spaces that ChessBase might add
+      while (!name.empty() && name[0] == ' ')
+        name.erase(0, 1);
+      while (!name.empty() && name.back() == ' ')
+        name.pop_back();
+
       // Debug: Log received option name (for ChessBase .uci file debugging)
       printf("info string Received option: '%s'\n", name.c_str());
-      
-      // Helper function to compare option names case-insensitively (for ChessBase compatibility)
-      auto case_insensitive_compare = [](const std::string& a, const std::string& b) -> bool {
-        if (a.length() != b.length()) return false;
+
+      // Helper function to compare option names case-insensitively (for
+      // ChessBase compatibility)
+      auto case_insensitive_compare = [](const std::string &a,
+                                         const std::string &b) -> bool {
+        if (a.length() != b.length())
+          return false;
         for (size_t i = 0; i < a.length(); i++) {
-          if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+          if (std::tolower(static_cast<unsigned char>(a[i])) !=
+              std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
         }
         return true;
       };
@@ -338,16 +354,19 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Enabled" || case_insensitive_compare(name, "Experience Enabled")) {
+      else if (name == "Experience Enabled" ||
+               case_insensitive_compare(name, "Experience Enabled")) {
         std::string value;
         input_stream >> value;
         bool enabled = (value == "true");
         Learning::set_experience_enabled(enabled);
-        printf("info string Experience Enabled is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Experience Enabled is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Experience File" || case_insensitive_compare(name, "Experience File")) {
+      else if (name == "Experience File" ||
+               case_insensitive_compare(name, "Experience File")) {
         std::string value;
         input_stream >> value;
         Learning::set_experience_file(value);
@@ -360,7 +379,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         input_stream >> value;
         bool readonly = (value == "true");
         Learning::set_experience_readonly(readonly);
-        printf("info string Experience Readonly is now: %s\n", readonly ? "enabled" : "disabled");
+        printf("info string Experience Readonly is now: %s\n",
+               readonly ? "enabled" : "disabled");
         continue;
       }
 
@@ -369,7 +389,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         input_stream >> value;
         bool enabled = (value == "true");
         Learning::set_experience_book_enabled(enabled);
-        printf("info string Experience Book is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Experience Book is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
@@ -377,7 +398,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_width(value);
-        printf("info string Experience Book Width = %d\n", Learning::get_experience_book_width());
+        printf("info string Experience Book Width = %d\n",
+               Learning::get_experience_book_width());
         continue;
       }
 
@@ -385,7 +407,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_eval_importance(value);
-        printf("info string Experience Book Eval Importance = %d\n", Learning::get_experience_book_eval_importance());
+        printf("info string Experience Book Eval Importance = %d\n",
+               Learning::get_experience_book_eval_importance());
         continue;
       }
 
@@ -393,7 +416,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_min_depth(value);
-        printf("info string Experience Book Min Depth = %d\n", Learning::get_experience_book_min_depth());
+        printf("info string Experience Book Min Depth = %d\n",
+               Learning::get_experience_book_min_depth());
         continue;
       }
 
@@ -401,68 +425,79 @@ void uci(ThreadInfo &thread_info, Position &position) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_max_moves(value);
-        printf("info string Experience Book Max Moves = %d\n", Learning::get_experience_book_max_moves());
+        printf("info string Experience Book Max Moves = %d\n",
+               Learning::get_experience_book_max_moves());
         continue;
       }
 
       // ========================================================================
       // FORTRESS DETECTION & ARMAGEDDON MODE (Crystal port)
       // ========================================================================
-      // Support both exact match and case-insensitive match for ChessBase compatibility
-      else if (name == "Fortress Detection" || case_insensitive_compare(name, "Fortress Detection")) {
+      // Support both exact match and case-insensitive match for ChessBase
+      // compatibility
+      else if (name == "Fortress Detection" ||
+               case_insensitive_compare(name, "Fortress Detection")) {
         std::string value;
         input_stream >> value;
         bool enabled = (value == "true");
         set_fortress_detection(enabled);
-        printf("info string Fortress Detection is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Fortress Detection is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Armageddon" || case_insensitive_compare(name, "Armageddon")) {
+      else if (name == "Armageddon" ||
+               case_insensitive_compare(name, "Armageddon")) {
         // Just "Armageddon" - the "value" keyword was already consumed
         std::string val;
-        input_stream >> val;  // true/false
+        input_stream >> val; // true/false
         bool enabled = (val == "true");
         set_armageddon_mode(enabled);
-        printf("info string Armageddon mode is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Armageddon mode is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Armageddon Psychology" || case_insensitive_compare(name, "Armageddon Psychology")) {
+      else if (name == "Armageddon Psychology" ||
+               case_insensitive_compare(name, "Armageddon Psychology")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
-        input_stream >> val;  // true/false
+        input_stream >> val; // true/false
         bool enabled = (val == "true");
         set_armageddon_psychology(enabled);
-        printf("info string Armageddon Psychology is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Armageddon Psychology is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Armageddon TB Penalty" || case_insensitive_compare(name, "Armageddon TB Penalty")) {
+      else if (name == "Armageddon TB Penalty" ||
+               case_insensitive_compare(name, "Armageddon TB Penalty")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
-        input_stream >> val;  // true/false
+        input_stream >> val; // true/false
         bool enabled = (val == "true");
         set_armageddon_tb_penalty(enabled);
-        printf("info string Armageddon TB Penalty is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Armageddon TB Penalty is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Debug Logging" || case_insensitive_compare(name, "Debug Logging")) {
+      else if (name == "Debug Logging" ||
+               case_insensitive_compare(name, "Debug Logging")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
-        input_stream >> val;  // true/false
+        input_stream >> val; // true/false
         bool enabled = (val == "true");
         Debug::set_enabled(enabled);
         if (enabled) {
-          Debug::init();  // Open log file when enabled
+          Debug::init(); // Open log file when enabled
         } else {
-          Debug::close();  // Close log file when disabled
+          Debug::close(); // Close log file when disabled
         }
-        printf("info string Debug Logging is now: %s\n", enabled ? "enabled" : "disabled");
+        printf("info string Debug Logging is now: %s\n",
+               enabled ? "enabled" : "disabled");
         continue;
       }
-
 
       input_stream >> value;
 
@@ -473,13 +508,14 @@ void uci(ThreadInfo &thread_info, Position &position) {
       else if (name == "Threads") {
 
         // CRITICAL FIX: Stop all searches first, then terminate threads
-        // This prevents threads from getting stuck in deep search when modes like
-        // Fortress Detection or Armageddon are enabled
+        // This prevents threads from getting stuck in deep search when modes
+        // like Fortress Detection or Armageddon are enabled
         thread_data.stop = true;
         thread_data.terminate = true;
 
         // CRITICAL FIX: Only wait on barriers if threads actually exist
-        // During initial load, no threads exist yet, so waiting on barriers will hang!
+        // During initial load, no threads exist yet, so waiting on barriers
+        // will hang!
         if (thread_data.threads.size() > 0) {
           // Try to synchronize, but don't block forever
           try {
@@ -490,7 +526,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
           }
         }
 
-        // Detach old threads instead of joining (faster, threads will exit on terminate)
+        // Detach old threads instead of joining (faster, threads will exit on
+        // terminate)
         for (int i = 0; i < thread_data.threads.size(); i++) {
           if (thread_data.threads[i].joinable()) {
             thread_data.threads[i].detach();
@@ -513,22 +550,23 @@ void uci(ThreadInfo &thread_info, Position &position) {
             thread_data.thread_infos.emplace_back();
             thread_data.threads.emplace_back(loop, i);
           }
-          
+
           // Give threads a moment to initialize and reach first barrier
           // This prevents deadlock when threads start before barriers are ready
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        
+
         // CRITICAL FIX: Reset stop flag so future searches can start
-        // This is especially important when Fortress Detection or Armageddon modes are enabled
+        // This is especially important when Fortress Detection or Armageddon
+        // modes are enabled
         thread_data.stop = false;
       }
 
       else if (name == "Skill_Level") {
         if (value == 21) {
           thread_info.is_human = false;
-        } 
-        
+        }
+
         else {
           thread_info.is_human = true;
           int to_elo = skill_levels[value - 1];
@@ -572,7 +610,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
       new_game(thread_info, TT);
       set_board(position, thread_info,
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-      
+
       // Reset stop flag so future searches can start
       thread_data.stop = false;
     }
@@ -580,11 +618,11 @@ void uci(ThreadInfo &thread_info, Position &position) {
     else if (command == "position") {
       // Stop any running search when position changes
       thread_data.stop = true;
-      
+
       if (s.joinable()) {
         s.join();
       }
-      
+
       thread_info.game_ply = 6;
       std::string setup;
       input_stream >> setup;
@@ -619,7 +657,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
           make_move(position, move);
         }
       }
-      
+
       // Reset stop flag so future searches can start
       thread_data.stop = false;
     }
@@ -693,7 +731,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
     // Experience utility commands (matching HypnoS exactly)
     else if (command == "defrag") {
       Learning::wait_for_loading_finished();
-      
+
       std::string filename;
       std::string token;
       // Read optional filename (like HypnoS)
@@ -706,86 +744,121 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     else if (command == "merge") {
       Learning::wait_for_loading_finished();
-      
+
       std::vector<std::string> filenames;
       std::string token;
       while (input_stream >> token) {
         filenames.push_back(token);
       }
-      
+
       if (filenames.empty()) {
         printf("info string Error : Incorrect merge command\n");
-        printf("info string Syntax: merge <filename> <filename1> [filename2] ... [filenameX]\n");
-        printf("info string The first <filename> is also the target experience file which will contain all the merged data\n");
-        printf("info string The files <filename1> ... <filenameX> are the other experience files to be merged\n");
+        printf("info string Syntax: merge <filename> <filename1> [filename2] "
+               "... [filenameX]\n");
+        printf("info string The first <filename> is also the target experience "
+               "file which will contain all the merged data\n");
+        printf("info string The files <filename1> ... <filenameX> are the "
+               "other experience files to be merged\n");
       } else {
         Learning::merge(filenames);
       }
     }
 
-    else if (command == "exp") {
+    else if (command == "mergenq") {
+      Learning::wait_for_loading_finished();
+
+      std::vector<std::string> filenames;
+      std::string token;
+      while (input_stream >> token) {
+        filenames.push_back(token);
+      }
+
+      if (filenames.empty()) {
+        printf("info string Error : Incorrect mergenq command\n");
+        printf("info string Syntax: mergenq <target> <source1> [source2] ... "
+               "[sourceN]\n");
+        printf("info string The first <target> is the destination file\n");
+        printf("info string Source files are merged WITHOUT quality impact\n");
+        printf("info string - New positions: added with count=0\n");
+        printf("info string - Existing positions: depth/value updated, count "
+               "preserved\n");
+      } else {
+        Learning::mergenq(filenames);
+      }
+    } else if (command == "exp") {
       // Show Experience for the current position (synthetic view)
       Learning::wait_for_loading_finished();
-      
+
       // Debug: Print position info
-      printf("Experience: Position key: %llu\n", static_cast<unsigned long long>(position.zobrist_key));
-      
+      printf("Experience: Position key: %llu\n",
+             static_cast<unsigned long long>(position.zobrist_key));
+
       if (!Learning::enabled()) {
         printf("Experience system is disabled\n");
       } else {
-        const Learning::ExpEntryEx* head = Learning::probe(position.zobrist_key);
+        const Learning::ExpEntryEx *head =
+            Learning::probe(position.zobrist_key);
         if (!head) {
           printf("No experience data found for this position\n");
         } else {
-        int evalImportance = Learning::get_experience_book_eval_importance();
-        
-        // Collect entries with quality scores (using positional quality like HypnoS)
-        std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
-        for (const Learning::ExpEntryEx* t = head; t; t = t->next) {
-          // Use positional quality with lookahead (like HypnoS)
-          auto [q, maybeDraw] = t->quality_positional(position, evalImportance,
-            [](Position& pos, uint16_t mv) { make_move(pos, static_cast<Move>(mv)); });
-          qualityList.emplace_back(t, q);
-        }
-        
-        // Sort by quality (highest first)
-        std::stable_sort(qualityList.begin(), qualityList.end(),
-                         [](const auto& a, const auto& b) { return a.second > b.second; });
-        
-        printf("\n");
-        int expCount = 0;
-        
-        for (const auto& pr : qualityList) {
-          int32_t value = pr.first->value;
-          int32_t depth = pr.first->depth;
-          uint16_t count = pr.first->count;
-          Move move = static_cast<Move>(pr.first->move);
-          int quality = pr.second;
-          
-          // Convert move to UCI string using internal_to_uci (like HypnoS uses UCIEngine::move)
-          std::string moveStr = internal_to_uci(position, move);
-          
-          // Eval string: convert to centipawns (like HypnoS)
-          int cp = value;  // Already in centipawns
-          char evalStr[64];
-          snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
-          
-          // Check for mate scores
-          constexpr int32_t VALUE_MATE = 32000;
-          constexpr int MAX_PLY = 256;
-          if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
-            int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
-            int m = (plies + 1) / 2;
-            if (value <= -VALUE_MATE + MAX_PLY) m = -m;
-            snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+          int evalImportance = Learning::get_experience_book_eval_importance();
+
+          // Collect entries with quality scores (using positional quality like
+          // HypnoS)
+          std::vector<std::pair<const Learning::ExpEntryEx *, int>> qualityList;
+          for (const Learning::ExpEntryEx *t = head; t; t = t->next) {
+            // Use positional quality with lookahead (like HypnoS)
+            auto [q, maybeDraw] = t->quality_positional(
+                position, evalImportance, [](Position &pos, uint16_t mv) {
+                  make_move(pos, static_cast<Move>(mv));
+                });
+            qualityList.emplace_back(t, q);
           }
-          
-          // Format output exactly like HypnoS
-          printf("%2d: %-5s, depth: %2d, eval: %s\n",
-                 ++expCount, moveStr.c_str(), depth, evalStr);
-        }
-        
-        printf("\n");
+
+          // Sort by quality (highest first)
+          std::stable_sort(
+              qualityList.begin(), qualityList.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+          printf("\n");
+          int expCount = 0;
+
+          for (const auto &pr : qualityList) {
+            int32_t value = pr.first->value;
+            int32_t depth = pr.first->depth;
+            uint16_t count = pr.first->count;
+            Move move = static_cast<Move>(pr.first->move);
+            int quality = pr.second;
+
+            // Convert move to UCI string using internal_to_uci (like HypnoS
+            // uses UCIEngine::move)
+            std::string moveStr = internal_to_uci(position, move);
+
+            // Eval string: convert to centipawns (like HypnoS)
+            int cp = value; // Already in centipawns
+            char evalStr[64];
+            snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
+
+            // Check for mate scores
+            constexpr int32_t VALUE_MATE = 32000;
+            constexpr int MAX_PLY = 256;
+            if (value >= VALUE_MATE - MAX_PLY ||
+                value <= -VALUE_MATE + MAX_PLY) {
+              int plies = (value >= VALUE_MATE - MAX_PLY)
+                              ? (VALUE_MATE - value)
+                              : (VALUE_MATE + value);
+              int m = (plies + 1) / 2;
+              if (value <= -VALUE_MATE + MAX_PLY)
+                m = -m;
+              snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+            }
+
+            // Format output exactly like HypnoS
+            printf("%2d: %-5s, depth: %2d, eval: %s\n", ++expCount,
+                   moveStr.c_str(), depth, evalStr);
+          }
+
+          printf("\n");
         }
       }
     }
@@ -793,66 +866,78 @@ void uci(ThreadInfo &thread_info, Position &position) {
     else if (command == "expex") {
       // Show Experience for the current position (extended view)
       Learning::wait_for_loading_finished();
-      
+
       // Debug: Print position info
-      printf("Experience: Position key: %llu\n", static_cast<unsigned long long>(position.zobrist_key));
-      
+      printf("Experience: Position key: %llu\n",
+             static_cast<unsigned long long>(position.zobrist_key));
+
       if (!Learning::enabled()) {
         printf("Experience system is disabled\n");
       } else {
-        const Learning::ExpEntryEx* head = Learning::probe(position.zobrist_key);
+        const Learning::ExpEntryEx *head =
+            Learning::probe(position.zobrist_key);
         if (!head) {
           printf("No experience data found for this position\n");
         } else {
-        int evalImportance = Learning::get_experience_book_eval_importance();
-        
-        // Collect entries with quality scores (using positional quality like HypnoS)
-        std::vector<std::pair<const Learning::ExpEntryEx*, int>> qualityList;
-        for (const Learning::ExpEntryEx* t = head; t; t = t->next) {
-          // Use positional quality with lookahead (like HypnoS)
-          auto [q, maybeDraw] = t->quality_positional(position, evalImportance,
-            [](Position& pos, uint16_t mv) { make_move(pos, static_cast<Move>(mv)); });
-          qualityList.emplace_back(t, q);
-        }
-        
-        // Sort by quality (highest first)
-        std::stable_sort(qualityList.begin(), qualityList.end(),
-                         [](const auto& a, const auto& b) { return a.second > b.second; });
-        
-        printf("\n");
-        int expCount = 0;
-        
-        for (const auto& pr : qualityList) {
-          int32_t value = pr.first->value;
-          int32_t depth = pr.first->depth;
-          uint16_t count = pr.first->count;
-          Move move = static_cast<Move>(pr.first->move);
-          int quality = pr.second;
-          
-          // Convert move to UCI string using internal_to_uci (like HypnoS uses UCIEngine::move)
-          std::string moveStr = internal_to_uci(position, move);
-          
-          // Eval string: convert to centipawns (like HypnoS)
-          int cp = value;  // Already in centipawns
-          char evalStr[64];
-          snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
-          
-          // Check for mate scores
-          constexpr int32_t VALUE_MATE = 32000;
-          constexpr int MAX_PLY = 256;
-          if (value >= VALUE_MATE - MAX_PLY || value <= -VALUE_MATE + MAX_PLY) {
-            int plies = (value >= VALUE_MATE - MAX_PLY) ? (VALUE_MATE - value) : (VALUE_MATE + value);
-            int m = (plies + 1) / 2;
-            if (value <= -VALUE_MATE + MAX_PLY) m = -m;
-            snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+          int evalImportance = Learning::get_experience_book_eval_importance();
+
+          // Collect entries with quality scores (using positional quality like
+          // HypnoS)
+          std::vector<std::pair<const Learning::ExpEntryEx *, int>> qualityList;
+          for (const Learning::ExpEntryEx *t = head; t; t = t->next) {
+            // Use positional quality with lookahead (like HypnoS)
+            auto [q, maybeDraw] = t->quality_positional(
+                position, evalImportance, [](Position &pos, uint16_t mv) {
+                  make_move(pos, static_cast<Move>(mv));
+                });
+            qualityList.emplace_back(t, q);
           }
-          
-          // Format output exactly like HypnoS (extended)
-          printf("%2d: %-5s, depth: %2d, eval: %-12s, count: %6u, quality: %6d\n",
-                 ++expCount, moveStr.c_str(), depth, evalStr, count, quality);
-        }
-        
-        printf("\n");
+
+          // Sort by quality (highest first)
+          std::stable_sort(
+              qualityList.begin(), qualityList.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
+
+          printf("\n");
+          int expCount = 0;
+
+          for (const auto &pr : qualityList) {
+            int32_t value = pr.first->value;
+            int32_t depth = pr.first->depth;
+            uint16_t count = pr.first->count;
+            Move move = static_cast<Move>(pr.first->move);
+            int quality = pr.second;
+
+            // Convert move to UCI string using internal_to_uci (like HypnoS
+            // uses UCIEngine::move)
+            std::string moveStr = internal_to_uci(position, move);
+
+            // Eval string: convert to centipawns (like HypnoS)
+            int cp = value; // Already in centipawns
+            char evalStr[64];
+            snprintf(evalStr, sizeof(evalStr), "cp %d", cp);
+
+            // Check for mate scores
+            constexpr int32_t VALUE_MATE = 32000;
+            constexpr int MAX_PLY = 256;
+            if (value >= VALUE_MATE - MAX_PLY ||
+                value <= -VALUE_MATE + MAX_PLY) {
+              int plies = (value >= VALUE_MATE - MAX_PLY)
+                              ? (VALUE_MATE - value)
+                              : (VALUE_MATE + value);
+              int m = (plies + 1) / 2;
+              if (value <= -VALUE_MATE + MAX_PLY)
+                m = -m;
+              snprintf(evalStr, sizeof(evalStr), "cp %d (mate %d)", cp, m);
+            }
+
+            // Format output exactly like HypnoS (extended)
+            printf("%2d: %-5s, depth: %2d, eval: %-12s, count: %6u, quality: "
+                   "%6d\n",
+                   ++expCount, moveStr.c_str(), depth, evalStr, count, quality);
+          }
+
+          printf("\n");
         }
       }
     }
