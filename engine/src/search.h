@@ -1869,9 +1869,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     int draw_score = 1 - (thread_info.nodes & 3);
     int material = material_eval(position, thread_info);
 
-    if (material < 0) {
+    if (material < -100) {
       draw_score += 50;
-    } else if (material > 0) {
+    } else if (material > 100) {
       draw_score -= 50;
     }
 
