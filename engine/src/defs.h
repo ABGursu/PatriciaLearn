@@ -4,6 +4,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <random>
+#include <vector>
 
 namespace Colors {
 constexpr uint8_t White = 0;
@@ -180,7 +181,24 @@ struct TTBucket {
 
 struct RootMoveInfo {
   Move move;
-  uint64_t nodes;
+  uint64_t nodes = 0;
+  int score = ScoreNone;
+  int previousScore = ScoreNone;
+  int averageScore = ScoreNone;
+  int64_t meanSquaredScore =
+      static_cast<int64_t>(-ScoreNone) * ScoreNone;
+  int selDepth = 0;
+  uint64_t effort = 0;
+  std::vector<Move> pv;
+
+  explicit RootMoveInfo(Move m) : move(m), pv(1, m) {}
+
+  bool operator==(Move m) const { return move == m; }
+
+  bool operator<(const RootMoveInfo &other) const {
+    return other.score != score ? other.score < score
+                                : other.previousScore < previousScore;
+  }
 };
 
 constexpr std::array<int, 7> SeeValues = {
@@ -217,6 +235,8 @@ constexpr int32_t side_index = 772;
 constexpr int32_t ep_index = 773;
 constexpr int32_t castling_index = 774;
 
+// Fixed Zobrist keys: same position → same hash across PatriciaLearn builds, so .exp files
+// are portable. Cross-engine .exp with HypnoS/BrainLearn would require the same key scheme.
 constexpr std::array<uint64_t, 778> zobrist_keys = {
     // Zobrist hash keys taken from Willow.
     // Their usage:

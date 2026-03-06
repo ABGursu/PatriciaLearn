@@ -2,6 +2,7 @@
 #include "defs.h"
 #include "nnue.h"
 #include "params.h"
+#include <atomic>
 #include <condition_variable>
 #include <fstream>
 #include <mutex>
@@ -54,6 +55,14 @@ struct alignas(64) ThreadInfo {
   uint8_t current_iter;
   uint16_t multipv = 1;
   uint16_t multipv_index;
+  uint16_t pvLast = 0;
+  int bestMoveChanges = 0;
+
+  std::array<int, 4> iterValue = {};
+  double previousTimeReduction = 0.85;
+  double originalTimeAdjust = -1.0;
+  int bestPreviousScore = ScoreNone;
+  int bestPreviousAverageScore = ScoreNone;
 
   Move excluded_move;
   std::array<Move, ListSize> best_moves;
@@ -62,6 +71,7 @@ struct alignas(64) ThreadInfo {
   uint8_t max_iter_depth = MaxSearchDepth;
   uint64_t max_nodes_searched = UINT64_MAX / 2;
   uint64_t opt_nodes_searched = UINT64_MAX / 2;
+  int mate_limit = 0;
 
   bool doing_datagen = false;
   bool datagen_stop = false;
@@ -151,7 +161,12 @@ struct ThreadData {
   int num_threads = 1;
   std::atomic<bool> stop = true;
   std::atomic<bool> terminate = false;
+  std::atomic<bool> increaseDepth{true};
+  std::atomic<bool> ponder{false};
+  std::atomic<bool> stopOnPonderhit{false};
   bool is_frc = false;
+  int moveOverhead = 10;
+  int minThinkingTime = 1;
 };
 
 ThreadData thread_data;
@@ -174,6 +189,10 @@ void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   std::memset(&thread_info.game_hist, 0, sizeof(thread_info.game_hist));
   std::memset(&TT[0], 0, TT_size * sizeof(TT[0]));
   thread_info.searches = 0;
+  thread_info.previousTimeReduction = 0.85;
+  thread_info.originalTimeAdjust = -1.0;
+  thread_info.bestPreviousScore = ScoreNone;
+  thread_info.bestPreviousAverageScore = ScoreNone;
   thread_info.cp_accum_loss = 0;
   
   // ============================================================================

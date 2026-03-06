@@ -61,9 +61,6 @@ TUNE_PARAM(AgeDiffDiv, 5, 2, 6);
 TUNE_PARAM(CorrWeight, 25, 10, 40);
 TUNE_PARAM(LMRMinDepth, 3, 2, 6);
 TUNE_PARAM(AspStartWindow, 20, 10, 30);
-TUNE_PARAM(NodeTmFactor1, 149, 100, 200);
-TUNE_PARAM(NodeTmFactor2, 177, 125, 225);
-TUNE_PARAM(BmFactor1, 152, 100, 200);
 
 
 void print_params_for_ob() {

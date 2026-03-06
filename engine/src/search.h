@@ -528,14 +528,16 @@ bool out_of_time(ThreadInfo &thread_info) {
   } else if (thread_info.thread_id != 0 || thread_info.current_iter == 1) {
     return false;
   }
+
+  if (thread_data.ponder)
+    return false;
+
   if (thread_info.nodes >= thread_info.max_nodes_searched) {
 
     if (thread_info.max_time < INT32_MAX / 3) {
 
       std::this_thread::sleep_for(std::chrono::milliseconds(
           thread_info.opt_time - time_elapsed(thread_info.start_time)));
-      // If there's a max time limit and a node limit, it means we're using a
-      // skill level. In that case, we don't want the engine to move instantly.
     }
 
     if (thread_info.doing_datagen) {
@@ -546,9 +548,10 @@ bool out_of_time(ThreadInfo &thread_info) {
     return true;
   }
   thread_info.time_checks++;
-  if (thread_info.time_checks == 1024) {
+  if (thread_info.time_checks == 512) {
     thread_info.time_checks = 0;
-    if (time_elapsed(thread_info.start_time) > thread_info.max_time) {
+    if (thread_data.stopOnPonderhit ||
+        time_elapsed(thread_info.start_time) > thread_info.max_time) {
       thread_data.stop = true;
       return true;
     }
@@ -2308,14 +2311,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   while (Move move = next_move(picker, position, thread_info, tt_move, skip)) {
 
     if (root) {
-      bool pv_skip = false;
-      for (int i = 0; i < thread_info.multipv_index; i++) {
-        if (thread_info.best_moves[i] == move) {
-          pv_skip = true;
-          break;
-        }
-      }
-      if (pv_skip) {
+      if (!std::count(thread_info.root_moves.begin() +
+                          thread_info.multipv_index,
+                      thread_info.root_moves.begin() + thread_info.pvLast,
+                      move)) {
         continue;
       }
     }
@@ -2626,8 +2625,38 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
 
     if (root) {
-      find_root_move(thread_info, move)->nodes +=
-          (thread_info.nodes - curr_nodes);
+      auto *rm = find_root_move(thread_info, move);
+      rm->nodes += (thread_info.nodes - curr_nodes);
+      rm->effort += (thread_info.nodes - curr_nodes);
+
+      rm->averageScore = rm->averageScore != ScoreNone
+                             ? (score + rm->averageScore) / 2
+                             : score;
+      constexpr int64_t MSS_UNSET =
+          static_cast<int64_t>(-ScoreNone) * ScoreNone;
+      rm->meanSquaredScore =
+          rm->meanSquaredScore != MSS_UNSET
+              ? (static_cast<int64_t>(score) * abs(score) +
+                 rm->meanSquaredScore) /
+                    2
+              : static_cast<int64_t>(score) * abs(score);
+
+      if (moves_played == 0 || score > alpha) {
+        rm->score = score;
+        rm->selDepth = thread_info.seldepth;
+        rm->pv.resize(1);
+        rm->pv[0] = move;
+        for (int j = 0; j < MaxSearchDepth - 1; j++) {
+          Move pm = thread_info.pv[MaxSearchDepth + j];
+          if (pm == MoveNone)
+            break;
+          rm->pv.push_back(pm);
+        }
+        if (moves_played > 0 && thread_info.multipv_index == 0)
+          thread_info.bestMoveChanges++;
+      } else {
+        rm->score = ScoreNone;
+      }
     }
 
     if (score > best_score) {
@@ -2669,6 +2698,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       thread_info.best_moves[thread_info.multipv_index] = best_move;
     }
     thread_info.best_scores[thread_info.multipv_index] = best_score;
+
+    std::stable_sort(thread_info.root_moves.begin() +
+                         thread_info.multipv_index,
+                     thread_info.root_moves.begin() + thread_info.pvLast);
   }
 
   if (best_score == ScoreNone) { // handle no legal moves (stalemate/checkmate)
@@ -2855,12 +2888,18 @@ void iterative_deepen(
 
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
+  thread_info.bestMoveChanges = 0;
   thread_info.nnue_state.reset_nnue(position, total_mat(position, thread_info) <
                                                   PhaseBound);
   calculate(position);
   thread_info.nodes = 0;
   thread_info.tb_hits = 0;
   thread_info.time_checks = 0;
+
+  if (thread_info.bestPreviousScore == ScoreNone)
+    thread_info.iterValue.fill(0);
+  else
+    thread_info.iterValue.fill(thread_info.bestPreviousScore);
   thread_info.phase = total_mat(position, thread_info) < PhaseBound
                           ? PhaseTypes::Endgame
                           : PhaseTypes::Sacrifice;
@@ -2879,9 +2918,10 @@ void iterative_deepen(
     std::array<Move, ListSize> raw_root_moves;
     int nmoves = legal_movegen(position, raw_root_moves);
     for (int i = 0; i < nmoves; i++) {
-      thread_info.root_moves.push_back({raw_root_moves[i], 0});
+      thread_info.root_moves.emplace_back(raw_root_moves[i]);
     }
   }
+  thread_info.pvLast = static_cast<uint16_t>(thread_info.root_moves.size());
 
   // Experience Book: Book move selection from HypnoS
   // If Experience Book is enabled and position is in the book, skip search
@@ -2985,87 +3025,127 @@ void iterative_deepen(
     }
   }
 
-  Move prev_best = MoveNone;
-  int alpha = ScoreNone, beta = -ScoreNone;
-  int bm_stability = 0;
+  int lastBestMoveDepth = 0;
+  Move lastBestMove = MoveNone;
+  int iterIdx = 0;
+  double totBestMoveChanges = 0;
+  double lastTimeReduction = 1.0;
+  int searchAgainCounter = 0;
 
   for (int depth = 1; depth <= thread_info.max_iter_depth; depth++) {
 
+    if (!thread_data.increaseDepth)
+      searchAgainCounter++;
+
+    if (thread_info.thread_id == 0)
+      totBestMoveChanges /= 2;
+
+    thread_info.current_iter = depth;
+
     int real_multi_pv =
         std::min<int>(thread_info.multipv, thread_info.root_moves.size());
+
+    // Save previous iteration's scores for aspiration window centering
+    for (auto &rm : thread_info.root_moves)
+      rm.previousScore = rm.score;
+
+    int pvFirst = 0;
+    thread_info.pvLast =
+        static_cast<uint16_t>(thread_info.root_moves.size());
+
     for (thread_info.multipv_index = 0;
          thread_info.multipv_index < real_multi_pv;
          thread_info.multipv_index++) {
 
-      int temp_depth = depth;
+      int searchAgainReduction = 3 * (searchAgainCounter + 1) / 4;
+      int temp_depth = std::max(1, depth - searchAgainReduction);
 
-      int score, delta = AspStartWindow;
+      // FIX #1: Per-PV aspiration window based on this line's own statistics
+      auto &curRM = thread_info.root_moves[thread_info.multipv_index];
+      int delta;
+      int alpha, beta;
 
-      score =
+      if (depth > 6 && curRM.averageScore != ScoreNone) {
+        constexpr int64_t MSS_UNSET =
+            static_cast<int64_t>(-ScoreNone) * ScoreNone;
+        delta = AspStartWindow + (thread_info.thread_id % 6);
+        if (curRM.meanSquaredScore != MSS_UNSET)
+          delta += static_cast<int>(
+              (curRM.meanSquaredScore < 0 ? -curRM.meanSquaredScore
+                                          : curRM.meanSquaredScore) /
+              9000);
+        int avg = curRM.averageScore;
+        alpha = std::max(avg - delta, static_cast<int>(ScoreNone));
+        beta = std::min(avg + delta, static_cast<int>(-ScoreNone));
+      } else {
+        delta = AspStartWindow;
+        alpha = ScoreNone;
+        beta = -ScoreNone;
+      }
+
+      thread_info.seldepth = 0;
+
+      int score =
           search<true>(alpha, beta, depth, false, position, thread_info, TT);
 
-      // Aspiration Windows: We search the position with a narrow window around
-      // the last search score in order to get cutoffs faster. If our search
-      // lands outside the bounds, expand them and try again.
-      // CRITICAL FIX: Add iteration limit to prevent infinite loops (especially
-      // in Armageddon mode)
-
+      // Aspiration Windows: HypnoS-style while(true) loop with explicit breaks.
+      // Critical: on stop, we BREAK (not goto finish) so that the sort and
+      // output code after the loop still runs.
       int asp_iterations = 0;
-      const int max_asp_iterations = 50; // Prevent infinite loops
+      const int max_asp_iterations = 50;
 
-      while ((score <= alpha || score >= beta || thread_data.stop ||
-              thread_info.datagen_stop) &&
-             asp_iterations < max_asp_iterations) {
+      while (true) {
+        if (score > alpha && thread_info.thread_id == 0)
+          thread_data.stopOnPonderhit = false;
+
+        if (thread_data.stop || thread_info.datagen_stop)
+          break;
+
+        if (score > alpha && score < beta)
+          break;
+
+        if (asp_iterations >= max_asp_iterations)
+          break;
 
         asp_iterations++;
 
-        if (thread_data.stop || thread_info.datagen_stop) {
-          goto finish;
-        }
-
-        // CRITICAL FIX: If we've expanded the window too much, reset to full
-        // window This prevents infinite loops when Armageddon mode returns
-        // extreme scores
         if (asp_iterations > 20) {
           alpha = ScoreNone;
           beta = -ScoreNone;
-          temp_depth = depth;
+          temp_depth = std::max(1, depth - searchAgainReduction);
           delta = AspStartWindow;
         }
 
         if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
+            real_multi_pv == 1 &&
             !(thread_info.is_human && thread_info.multipv_index)) {
-          std::string bound_string;
-          if (score >= beta) {
-            bound_string = "lowerbound";
-          } else {
-            bound_string = "upperbound";
-          }
+          std::string bound_string =
+              score >= beta ? "lowerbound" : "upperbound";
 
           uint64_t nodes = thread_info.nodes;
-          for (auto &td : thread_data.thread_infos) {
+          for (auto &td : thread_data.thread_infos)
             nodes += td.nodes;
-          }
+
           int64_t search_time = time_elapsed(thread_info.start_time);
           int64_t nps = search_time
                             ? static_cast<int64_t>(nodes) * 1000 / search_time
                             : 123456789;
 
-          Move move = score <= alpha
-                          ? prev_best
-                          : thread_info.best_moves[thread_info.multipv_index];
+          auto &pvRM = thread_info.root_moves[thread_info.multipv_index];
+          Move asp_move = pvRM.pv.empty() ? MoveNone : pvRM.pv[0];
 
           printf("info multipv %i depth %i seldepth %i score cp %i %s nodes "
                  "%" PRIu64 " nps %" PRIi64 " time %" PRIi64 " pv %s\n",
                  thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                 score * 100 / NormalizationFactor, bound_string.c_str(), nodes,
-                 nps, search_time, internal_to_uci(position, move).c_str());
+                 score * 100 / NormalizationFactor, bound_string.c_str(),
+                 nodes, nps, search_time,
+                 internal_to_uci(position, asp_move).c_str());
         }
 
         if (score <= alpha) {
           beta = (alpha + beta) / 2;
           alpha -= delta;
-          temp_depth = depth;
+          temp_depth = std::max(1, depth - searchAgainReduction);
         } else if (score >= beta) {
           beta += delta;
           temp_depth = std::max(temp_depth - 1, 1);
@@ -3076,24 +3156,21 @@ void iterative_deepen(
                              thread_info, TT);
       }
 
-      if (score == ScoreNone) {
-        break;
+      // Sort PV lines searched so far by score (like HypnoS line 846)
+      std::stable_sort(thread_info.root_moves.begin() + pvFirst,
+                       thread_info.root_moves.begin() +
+                           thread_info.multipv_index + 1);
+
+      // Sync best_moves and best_scores for ALL requested PV lines
+      // (non-searched lines retain previous depth data via previousScore)
+      for (int i = 0; i < real_multi_pv; i++) {
+        auto &rm_sync = thread_info.root_moves[i];
+        thread_info.best_moves[i] =
+            rm_sync.pv.empty() ? MoveNone : rm_sync.pv[0];
+        thread_info.best_scores[i] = rm_sync.score;
       }
-
-      std::string eval_string;
-
-      if (abs(score) <= ScoreTbWin) {
-        eval_string = "cp " + std::to_string(score * 100 / NormalizationFactor);
-      } else if (score > 0) {
-        eval_string = "mate " + std::to_string((ScoreMate - score + 1) / 2);
-      } else {
-        eval_string = "mate " + std::to_string((-ScoreMate - score) / 2);
-      }
-
-      thread_info.best_moves[thread_info.multipv_index] = thread_info.pv[0];
 
       if (thread_info.thread_id == 0) {
-
         uint64_t tb_hits = thread_info.tb_hits;
         uint64_t nodes = thread_info.nodes;
 
@@ -3112,22 +3189,67 @@ void iterative_deepen(
           nps = wezly;
         }
 
-        if (!thread_info.doing_datagen /*&&
-            !(thread_info.is_human && thread_info.multipv_index)*/) {
-          printf("info multipv %i depth %i seldepth %i score %s nodes %" PRIu64
-                 " nps %" PRIi64 " tbhits %" PRIu64 " time %" PRIi64 " pv ",
-                 thread_info.multipv_index + 1, depth, thread_info.seldepth,
-                 eval_string.c_str(), nodes, nps, tb_hits, search_time);
-          print_pv(position, thread_info);
+        // Output ALL MultiPV lines in sorted order (like HypnoS pv())
+        // HypnoS outputs all lines (0..multiPV-1), using previousScore for
+        // lines not yet searched at this depth.
+        if (!thread_info.doing_datagen &&
+            (thread_data.stop ||
+             thread_info.multipv_index + 1 == real_multi_pv ||
+             search_time > 5000)) {
+
+          int saved_mpv_idx = thread_info.multipv_index;
+
+          for (int i = 0; i < real_multi_pv; i++) {
+            auto &rm_out = thread_info.root_moves[i];
+            bool updated = rm_out.score != ScoreNone;
+
+            if (depth == 1 && !updated && i > 0)
+              continue;
+
+            int d = updated ? depth : std::max(1, depth - 1);
+            int v = updated ? rm_out.score : rm_out.previousScore;
+            if (v == ScoreNone)
+              v = 0;
+
+            std::string eval_string;
+            if (abs(v) <= ScoreTbWin) {
+              eval_string =
+                  "cp " + std::to_string(v * 100 / NormalizationFactor);
+            } else if (v > 0) {
+              eval_string =
+                  "mate " + std::to_string((ScoreMate - v + 1) / 2);
+            } else {
+              eval_string =
+                  "mate " + std::to_string((-ScoreMate - v) / 2);
+            }
+
+            thread_info.multipv_index = i;
+            std::memset(&thread_info.pv, 0, sizeof(thread_info.pv));
+            for (size_t j = 0;
+                 j < rm_out.pv.size() &&
+                 j < static_cast<size_t>(MaxSearchDepth);
+                 j++) {
+              thread_info.pv[j] = rm_out.pv[j];
+            }
+
+            printf(
+                "info multipv %i depth %i seldepth %i score %s nodes %" PRIu64
+                " nps %" PRIi64 " tbhits %" PRIu64 " time %" PRIi64 " pv ",
+                i + 1, d,
+                rm_out.selDepth > 0 ? rm_out.selDepth : thread_info.seldepth,
+                eval_string.c_str(), nodes, nps, tb_hits, search_time);
+            print_pv(position, thread_info);
+          }
+
+          thread_info.multipv_index = saved_mpv_idx;
         }
 
-        else {
-          thread_info.best_scores[0] = score * 100 / NormalizationFactor;
+        if (thread_info.doing_datagen) {
+          thread_info.best_scores[0] =
+              thread_info.root_moves[0].score * 100 / NormalizationFactor;
         }
 
-        if (search_time > thread_info.opt_time ||
-            nodes > thread_info.opt_nodes_searched) {
-
+        if (nodes > thread_info.opt_nodes_searched) {
           if (thread_info.doing_datagen) {
             thread_info.datagen_stop = true;
           } else {
@@ -3135,17 +3257,48 @@ void iterative_deepen(
           }
         }
 
-        else if (thread_info.multipv == 1 && depth > 6) {
-          if (thread_info.best_moves[0] == prev_best) {
-            bm_stability = std::min(bm_stability + 1, 8);
-          } else {
-            bm_stability = 0;
+        else if (thread_info.multipv == 1 && score != ScoreNone) {
+          totBestMoveChanges += thread_info.bestMoveChanges;
+          thread_info.bestMoveChanges = 0;
+          for (auto &td : thread_data.thread_infos) {
+            totBestMoveChanges += td.bestMoveChanges;
+            td.bestMoveChanges = 0;
           }
 
-          adjust_soft_limit(
-              thread_info,
-              find_root_move(thread_info, thread_info.best_moves[0])->nodes,
-              bm_stability);
+          double timeReductionResult;
+          double totalTime = compute_soft_limit(
+              thread_info, depth, thread_info.root_moves[0].score, iterIdx,
+              lastBestMoveDepth, totBestMoveChanges,
+              thread_data.num_threads, timeReductionResult);
+          lastTimeReduction = timeReductionResult;
+
+          thread_info.opt_time = static_cast<uint32_t>(
+              std::min(totalTime, (double)thread_info.max_time));
+
+          if (search_time >
+              std::min(totalTime, (double)thread_info.max_time)) {
+            if (thread_data.ponder) {
+              thread_data.stopOnPonderhit = true;
+              thread_data.increaseDepth = true;
+            } else if (thread_info.doing_datagen) {
+              thread_info.datagen_stop = true;
+            } else {
+              thread_data.stop = true;
+            }
+          } else {
+            thread_data.increaseDepth =
+                thread_data.ponder.load() || search_time <= totalTime * 0.50;
+          }
+        }
+
+        else if (search_time > thread_info.opt_time) {
+          if (thread_data.ponder) {
+            thread_data.stopOnPonderhit = true;
+          } else if (thread_info.doing_datagen) {
+            thread_info.datagen_stop = true;
+          } else {
+            thread_data.stop = true;
+          }
         }
 
         if (depth >= 6 && total_mat(position) >= PhaseBound) {
@@ -3166,24 +3319,72 @@ void iterative_deepen(
         goto finish;
       }
 
-      prev_best = thread_info.best_moves[0];
-
-      if (depth > 6 && thread_info.multipv_index == 0) {
-        alpha = score - 20, beta = score + 20;
-      } else {
-        alpha = ScoreNone, beta = -ScoreNone;
+      if (score == ScoreNone) {
+        break;
       }
+    }
+
+    // Track lastBestMoveDepth outside the multipv loop (like HypnoS line 877)
+    if (!thread_info.root_moves.empty() &&
+        !thread_info.root_moves[0].pv.empty() &&
+        thread_info.root_moves[0].pv[0] != lastBestMove) {
+      lastBestMove = thread_info.root_moves[0].pv[0];
+      lastBestMoveDepth = depth;
+    }
+
+    // Mate search stop (DIFF 17, HypnoS line 888)
+    if (thread_info.thread_id == 0 && thread_info.mate_limit > 0 &&
+        !thread_info.root_moves.empty()) {
+      int s = thread_info.root_moves[0].score;
+      if ((s >= ScoreWin && ScoreMate - s <= 2 * thread_info.mate_limit) ||
+          (s != ScoreNone && s <= ScoreLost &&
+           ScoreMate + s <= 2 * thread_info.mate_limit))
+        thread_data.stop = true;
+    }
+
+    // Update iterValue unconditionally (like HypnoS line 953)
+    if (thread_info.thread_id == 0 && !thread_info.root_moves.empty()) {
+      thread_info.iterValue[iterIdx] = thread_info.root_moves[0].score;
+      iterIdx = (iterIdx + 1) % 4;
     }
   }
 
+  // Busy wait for stop/ponderhit when pondering (HypnoS line 435)
+  if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
+    while (!thread_data.stop && thread_data.ponder)
+      ;
+  }
+
 finish:
-  // wait for all threads to finish searching BEFORE saving experience
-  // (matches HypnoS: threads.wait_for_search_finished() before
-  // add_pv_experience)
+  // Wait for all threads to finish BEFORE reading their data
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen) {
     thread_data.stop = true;
   }
   search_end_barrier.arrive_and_wait();
+
+  // Persist cross-search state from the best thread (like HypnoS line 570)
+  if (thread_info.thread_id == 0 && !thread_info.root_moves.empty()) {
+    int bestScore = thread_info.root_moves[0].score;
+    int bestDepth = thread_info.current_iter;
+    ThreadInfo *bestSource = &thread_info;
+
+    for (auto &td : thread_data.thread_infos) {
+      if (td.root_moves.empty())
+        continue;
+      int s = td.root_moves[0].score;
+      int d = td.current_iter;
+      if (d > bestDepth || (d == bestDepth && s > bestScore)) {
+        bestScore = s;
+        bestDepth = d;
+        bestSource = &td;
+      }
+    }
+
+    thread_info.bestPreviousScore = bestSource->root_moves[0].score;
+    thread_info.bestPreviousAverageScore =
+        bestSource->root_moves[0].averageScore;
+    thread_info.previousTimeReduction = lastTimeReduction;
+  }
 
   // Save experience data (PV and MultiPV) - AFTER barrier to avoid race
   // condition. Matches HypnoS conditions exactly.
@@ -3267,8 +3468,16 @@ finish:
 
   if (thread_info.thread_id == 0 && !thread_info.doing_datagen &&
       !thread_info.is_human) {
-    printf("bestmove %s\n",
-           internal_to_uci(position, thread_info.best_moves[0]).c_str());
+    std::string ponderMove;
+    if (!thread_info.root_moves.empty() &&
+        thread_info.root_moves[0].pv.size() > 1)
+      ponderMove =
+          " ponder " +
+          internal_to_uci(position, thread_info.root_moves[0].pv[1]);
+
+    printf("bestmove %s%s\n",
+           internal_to_uci(position, thread_info.best_moves[0]).c_str(),
+           ponderMove.c_str());
   }
 }
 
@@ -3294,6 +3503,8 @@ void search_position(Position &position, ThreadInfo &thread_info,
   idle_barrier.arrive_and_wait();
 
   thread_data.stop = false;
+  thread_data.increaseDepth = true;
+  thread_data.stopOnPonderhit = false;
   iterative_deepen(position, thread_info, TT);
   if (!thread_info.doing_datagen) {
     thread_data.stop = true;

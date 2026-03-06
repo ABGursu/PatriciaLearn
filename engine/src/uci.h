@@ -169,8 +169,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
   // Debug logging is disabled by default (controlled by UCI option)
   // Debug::init() will be called when user enables "Debug Logging" option
 
-  printf("Patricia Chess Engine 5.2, written by Adam Kulju, edited by A. B. "
-         "Gursu\n\n\n");
+  printf("Patricia Chess Engine 5.4, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
   // Initialize Learning system (load experience file)
   Learning::init();
@@ -245,8 +244,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     else if (command == "uci") {
       printf(
-          "id name Patricia 5.2\n"
-          "id author Adam Kulju\n"
+          "id name Patricia 5.4\n"
+          "id author Adam Kulju, A.B. Gursu\n"
           "option name Hash type spin default 32 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
           "option name SyzygyPath type string default null\n"
@@ -264,6 +263,9 @@ void uci(ThreadInfo &thread_info, Position &position) {
           "max 64\n"
           "option name Experience Book Max Moves type spin default 16 min 1 "
           "max 100\n"
+          "option name Ponder type check default false\n"
+          "option name Move Overhead type spin default 10 min 0 max 5000\n"
+          "option name Minimum Thinking Time type spin default 1 min 0 max 5000\n"
           "option name Fortress Detection type check default false\n"
           "option name Armageddon type check default false\n"
           "option name Armageddon Psychology type check default false\n"
@@ -331,13 +333,16 @@ void uci(ThreadInfo &thread_info, Position &position) {
         input_stream >> value;
         if (value == "true") {
           thread_data.is_frc = true;
-
-        }
-
-        else {
+        } else {
           thread_data.is_frc = false;
         }
+        continue;
+      }
 
+      else if (name == "Ponder" ||
+               case_insensitive_compare(name, "Ponder")) {
+        std::string value;
+        input_stream >> value;
         continue;
       }
 
@@ -577,6 +582,19 @@ void uci(ThreadInfo &thread_info, Position &position) {
         thread_info.multipv = value;
       }
 
+      else if (name == "Move Overhead" ||
+               case_insensitive_compare(name, "Move Overhead")) {
+        thread_data.moveOverhead = value;
+        printf("info string Move Overhead = %d\n", thread_data.moveOverhead);
+      }
+
+      else if (name == "Minimum Thinking Time" ||
+               case_insensitive_compare(name, "Minimum Thinking Time")) {
+        thread_data.minThinkingTime = value;
+        printf("info string Minimum Thinking Time = %d\n",
+               thread_data.minThinkingTime);
+      }
+
       else {
         for (auto &param : params) {
           if (name == param.name) {
@@ -591,10 +609,15 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     else if (command == "stop") {
       thread_data.stop = true;
+      thread_data.ponder = false;
 
       if (s.joinable()) {
         s.join();
       }
+    }
+
+    else if (command == "ponderhit") {
+      thread_data.ponder = false;
     }
 
     else if (command == "ucinewgame") {
@@ -674,8 +697,14 @@ void uci(ThreadInfo &thread_info, Position &position) {
       }
       thread_info.max_nodes_searched = UINT64_MAX / 2;
       thread_info.max_iter_depth = MaxSearchDepth;
+      thread_info.mate_limit = 0;
+      thread_data.ponder = false;
+      thread_data.stopOnPonderhit = false;
 
       int color = position.color, time = INT32_MAX, increment = 0;
+      int movestogo = 0;
+      bool isMovetime = false;
+      int movetimeVal = 0;
       std::string token;
       while (input_stream >> token) {
         if (token == "infinite") {
@@ -688,6 +717,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
           input_stream >> increment;
         } else if (token == "binc" && color == Colors::Black) {
           input_stream >> increment;
+        } else if (token == "movestogo") {
+          input_stream >> movestogo;
         } else if (token == "nodes") {
           uint64_t nodes;
           input_stream >> nodes;
@@ -697,21 +728,75 @@ void uci(ThreadInfo &thread_info, Position &position) {
           input_stream >> depth;
           thread_info.max_iter_depth = depth;
         } else if (token == "movetime") {
-          int time;
-          input_stream >> time;
-          thread_info.max_time = time;
-          thread_info.opt_time = INT32_MAX / 2;
-          goto run;
+          input_stream >> movetimeVal;
+          isMovetime = true;
+        } else if (token == "ponder") {
+          thread_data.ponder = true;
+        } else if (token == "mate") {
+          input_stream >> thread_info.mate_limit;
         }
       }
 
-      // Calculate time allotted to search
+      if (isMovetime) {
+        thread_info.max_time = movetimeVal;
+        thread_info.opt_time = INT32_MAX / 2;
+      } else {
+        // HypnoS-style time allocation (timeman.cpp init)
+        int moveOverhead = thread_data.moveOverhead;
+        int minThinkingTime = thread_data.minThinkingTime;
 
-      time = std::max(2, time - 50);
-      thread_info.max_time = time * 8 / 10;
-      thread_info.opt_time = (time / 20 + increment) * 6 / 10;
+        int ply = thread_info.game_ply;
 
-    run:
+        int centiMTG = movestogo ? std::min(movestogo * 100, 5000) : 5051;
+        if (time < 1000)
+          centiMTG = (int)(time * 5.051);
+
+        int64_t timeLeft = std::max(
+            (int64_t)1,
+            (int64_t)time +
+                ((int64_t)increment * (centiMTG - 100) -
+                 (int64_t)moveOverhead * (200 + centiMTG)) /
+                    100);
+
+        double optScale, maxScale;
+
+        if (movestogo == 0) {
+          if (thread_info.originalTimeAdjust < 0)
+            thread_info.originalTimeAdjust =
+                0.3128 * std::log10((double)timeLeft) - 0.4354;
+
+          double logTimeInSec = std::log10(time / 1000.0);
+          double optConstant =
+              std::min(0.0032116 + 0.000321123 * logTimeInSec, 0.00508017);
+          double maxConstant =
+              std::max(3.3977 + 3.03950 * logTimeInSec, 2.94761);
+
+          optScale =
+              std::min(0.0121431 +
+                           std::pow(ply + 2.94693, 0.461073) * optConstant,
+                       0.213035 * time / (double)timeLeft) *
+              thread_info.originalTimeAdjust;
+
+          maxScale = std::min(6.67704, maxConstant + ply / 11.9847);
+        } else {
+          optScale =
+              std::min((0.88 + ply / 116.4) / (centiMTG / 100.0),
+                       0.88 * time / (double)timeLeft);
+          maxScale = 1.3 + 0.11 * (centiMTG / 100.0);
+        }
+
+        thread_info.opt_time = std::max(
+            (uint32_t)minThinkingTime, (uint32_t)(optScale * timeLeft));
+        thread_info.max_time = (uint32_t)(std::min(
+            0.825179 * time - moveOverhead,
+            maxScale * thread_info.opt_time));
+        if (thread_info.max_time > 10)
+          thread_info.max_time -= 10;
+
+        if (thread_data.ponder)
+          thread_info.opt_time += thread_info.opt_time / 4;
+      }
+
       run_thread(position, thread_info, s);
     }
 
