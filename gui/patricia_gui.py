@@ -6,6 +6,7 @@ GUI tool for managing Patricia chess engine experience (.exp) learning features.
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+from typing import Callable
 import chess
 import chess.pgn
 import subprocess
@@ -74,6 +75,19 @@ def save_position_index(exp_path: str, index: dict[int, str]):
     raw = {str(k): v for k, v in index.items()}
     with open(idx_path, "w", encoding="utf-8") as f:
         json.dump(raw, f, separators=(",", ":"))
+
+
+def merge_position_indexes(target_exp_path: str, source_exp_paths: list[str]) -> int:
+    """Merge position indexes from target and all sources into target. Returns number of keys added."""
+    combined = load_position_index(target_exp_path)
+    initial = len(combined)
+    for path in source_exp_paths:
+        idx = load_position_index(path)
+        for k, fen in idx.items():
+            if k not in combined:
+                combined[k] = fen
+    save_position_index(target_exp_path, combined)
+    return len(combined) - initial
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +255,10 @@ class EngineProcess:
             return list(self._collected)
 
     def get_position_key(self, fen: str, timeout=10) -> int | None:
-        """Set a position and retrieve its Zobrist key via the exp command."""
+        """Set a position and retrieve its Zobrist key via the expex command."""
         self.start_collecting()
         self.set_position_fen(fen)
-        self.send("exp")
+        self.send("expex")
         self._readyok_event.clear()
         self.send("isready")
         self._readyok_event.wait(timeout=timeout)
@@ -259,7 +273,7 @@ class EngineProcess:
     def get_current_position_key(self, timeout=10) -> int | None:
         """Retrieve the Zobrist key of the already-set position."""
         self.start_collecting()
-        self.send("exp")
+        self.send("expex")
         self._readyok_event.clear()
         self.send("isready")
         self._readyok_event.wait(timeout=timeout)
@@ -299,6 +313,27 @@ class EngineProcess:
                     }
                 )
         return entries
+
+    def get_key_and_has_experience(self, fen: str, timeout=10) -> tuple[int | None, bool]:
+        """Set position, send expex; return (key, True) only if engine has experience for this position."""
+        self.start_collecting()
+        self.set_position_fen(fen)
+        self.send("expex")
+        self._readyok_event.clear()
+        self.send("isready")
+        self._readyok_event.wait(timeout=timeout)
+        lines = self.stop_collecting()
+
+        key = None
+        has_experience = False
+        entry_pat = re.compile(r"depth:\s*\d+")
+        for ln in lines:
+            m = re.search(r"Position key:\s*(\d+)", ln)
+            if m:
+                key = int(m.group(1))
+            if entry_pat.search(ln):
+                has_experience = True
+        return (key, has_experience)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +376,53 @@ def games_from_pgn(pgn_path: str) -> list[GameData]:
             if moves:
                 games.append((label, start_fen, moves))
     return games
+
+
+def count_pgn_games_and_positions(
+    pgn_path: str,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[int, int]:
+    """Stream PGN and count games and positions. Low memory; suitable for huge files.
+    Optional progress_callback(games_so_far, positions_so_far) and cancel_check()."""
+    total_games = 0
+    total_positions = 0
+    with open(pgn_path, encoding="utf-8", errors="replace") as f:
+        while True:
+            if cancel_check and cancel_check():
+                break
+            game = chess.pgn.read_game(f)
+            if game is None:
+                break
+            n = sum(1 for _ in game.mainline_moves())
+            if n > 0:
+                total_games += 1
+                total_positions += n
+            if progress_callback and total_games % 1000 == 0 and total_games > 0:
+                progress_callback(total_games, total_positions)
+    return (total_games, total_positions)
+
+
+def games_from_pgn_streaming(pgn_path: str):
+    """Yield (label, start_fen_or_None, [(uci_move, fen_after), ...]) one game at a time.
+    Low memory; use for large PGNs."""
+    with open(pgn_path, encoding="utf-8", errors="replace") as f:
+        while True:
+            game = chess.pgn.read_game(f)
+            if game is None:
+                break
+            label = _game_header(game)
+            board = game.board()
+            start_fen: str | None = None
+            if board.fen() != chess.STARTING_FEN:
+                start_fen = board.fen()
+            moves: list[tuple[str, str]] = []
+            for move in game.mainline_moves():
+                uci_str = move.uci()
+                board.push(move)
+                moves.append((uci_str, board.fen()))
+            if moves:
+                yield (label, start_fen, moves)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +604,33 @@ class PatriciaGUI(ctk.CTk):
             font=ctk.CTkFont(size=11),
         ).pack(padx=10, pady=(10, 6), anchor="w")
 
+        # Optional: build position index from PGN (only positions that have experience)
+        self.du_pgn_path_var = ctk.StringVar()
+        du_opt_frame = ctk.CTkFrame(tab, fg_color=("gray85", "gray25"))
+        du_opt_frame.pack(fill="x", padx=10, pady=(4, 8))
+        ctk.CTkLabel(
+            du_opt_frame,
+            text="Optional: Build position index from PGN (only positions with experience in the .exp file)",
+            font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        du_pgn_row = ctk.CTkFrame(du_opt_frame, fg_color="transparent")
+        du_pgn_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(du_pgn_row, text="PGN file:").pack(side="left")
+        ctk.CTkEntry(du_pgn_row, textvariable=self.du_pgn_path_var, state="readonly", width=400).pack(
+            side="left", padx=(6, 6)
+        )
+        ctk.CTkButton(du_pgn_row, text="Browse…", width=80, command=self._pick_du_pgn).pack(side="left")
+        self.du_getkeys_btn = ctk.CTkButton(
+            du_opt_frame,
+            text="Get keys from PGN",
+            width=160,
+            fg_color="#3498db",
+            hover_color="#2980b9",
+            command=self._start_du_getkeys,
+        )
+        self.du_getkeys_btn.pack(side="left", padx=10, pady=(0, 8))
+        self._all_action_btns.append(self.du_getkeys_btn)
+
         row = ctk.CTkFrame(tab, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=4)
         ctk.CTkLabel(row, text="Depth Threshold (find below):").pack(side="left")
@@ -617,6 +726,14 @@ class PatriciaGUI(ctk.CTk):
         )
         if p:
             self.pgn_path_var.set(p)
+
+    def _pick_du_pgn(self):
+        p = filedialog.askopenfilename(
+            title="Select PGN File (for position index)",
+            filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")],
+        )
+        if p:
+            self.du_pgn_path_var.set(p)
 
     def _pick_syzygy(self):
         d = filedialog.askdirectory(title="Select Syzygy Tablebases Folder")
@@ -982,6 +1099,100 @@ class PatriciaGUI(ctk.CTk):
         )
         self._worker.start()
 
+    def _start_du_getkeys(self):
+        if self._is_busy():
+            return
+        if not self._validate_global():
+            return
+        pgn_path = self.du_pgn_path_var.get().strip()
+        if not pgn_path:
+            messagebox.showerror("Missing Input", "Please select a PGN file for the position index.")
+            return
+        if not os.path.isfile(pgn_path):
+            messagebox.showerror("File Not Found", "The selected PGN file does not exist.")
+            return
+        exp_path = self.exp_path_var.get()
+        self._set_busy(self.du_stop_btn)
+        self._worker = threading.Thread(
+            target=self._du_getkeys_worker, args=(exp_path, pgn_path), daemon=True
+        )
+        self._worker.start()
+
+    def _du_getkeys_worker(self, exp_path: str, pgn_path: str):
+        try:
+            self._update_status(self.du_status, "Counting PGN (large file may take a while)...")
+            self._update_progress(self.du_progress, 0)
+
+            def on_count_progress(games_so_far: int, positions_so_far: int):
+                self._update_status(
+                    self.du_status,
+                    f"Counting PGN: {games_so_far} games, {positions_so_far} positions…",
+                )
+
+            total_games, total_positions = count_pgn_games_and_positions(
+                pgn_path,
+                progress_callback=on_count_progress,
+                cancel_check=self._cancel.is_set,
+            )
+
+            if self._cancel.is_set():
+                self._enqueue_log("[DU] Get keys cancelled by user.")
+                return
+            if total_positions == 0:
+                self._update_status(self.du_status, "No positions found in PGN.")
+                self._enqueue_log("[DU] No positions in PGN.")
+                return
+
+            self._enqueue_log(
+                f"[DU] Get keys: {total_games} games, {total_positions} positions (streaming)."
+            )
+            pos_index = load_position_index(exp_path)
+            self._ensure_engine()
+
+            done = 0
+            added = 0
+            game_idx = 0
+            for label, start_fen, moves in games_from_pgn_streaming(pgn_path):
+                if self._cancel.is_set():
+                    self._enqueue_log("[DU] Get keys cancelled by user.")
+                    break
+                game_idx += 1
+                for uci_move, fen_after in moves:
+                    if self._cancel.is_set():
+                        break
+                    key, has_exp = self.engine.get_key_and_has_experience(fen_after, timeout=15)
+                    if key is not None and has_exp:
+                        if key not in pos_index:
+                            added += 1
+                        pos_index[key] = fen_after
+                    done += 1
+                    # Progress bar every 50 positions
+                    if done % 50 == 0 or done == total_positions:
+                        self._update_progress(self.du_progress, done / total_positions)
+                    # Status every 100 positions (and at end) so you see where we are
+                    if done % 100 == 0 or done == total_positions:
+                        self._update_status(
+                            self.du_status,
+                            f"Game {game_idx}/{total_games}  pos {done}/{total_positions}  keys +{added}",
+                        )
+
+            save_position_index(exp_path, pos_index)
+            self._enqueue_log(
+                f"[DU] Position index updated: {len(pos_index)} total ({added} new from PGN)."
+            )
+            if not self._cancel.is_set():
+                self._update_status(
+                    self.du_status,
+                    f"Done — {added} keys added from PGN (index now has {len(pos_index)} entries).",
+                )
+            else:
+                self._update_status(self.du_status, "Cancelled.")
+        except Exception as exc:
+            self._enqueue_log(f"[DU] Get keys error: {exc}")
+            self._update_status(self.du_status, f"Error: {exc}")
+        finally:
+            self.after(0, lambda: self._set_idle(self.du_stop_btn))
+
     def _du_worker(self, exp_path: str, threshold: int, target_depth: int):
         try:
             self._update_status(self.du_status, "Reading .exp file...")
@@ -1030,6 +1241,11 @@ class PatriciaGUI(ctk.CTk):
                 self._enqueue_log(
                     f"[DU] {unresolved} positions could not be resolved to FENs "
                     "(not in the position index)."
+                )
+                self._enqueue_log(
+                    "[DU] Tip: The position index is built by PGN Analysis and by merging "
+                    ".exp files (their .positions.json are merged). Run PGN Analysis or merge "
+                    "files that have position indexes to make more positions resolvable."
                 )
 
             self._enqueue_log(
@@ -1113,6 +1329,10 @@ class PatriciaGUI(ctk.CTk):
                 self._ensure_engine()
                 self.engine.send(f"{cmd_name} {args}")
                 self.engine.wait_ready(timeout=300)
+                # Merge position indexes so Depth Upgrade can resolve keys from merged files
+                added = merge_position_indexes(target, list(sources))
+                if added > 0:
+                    self._enqueue_log(f"[OPS] Position index merged: {added} keys added from source(s).")
                 self._update_status(self.ops_status, f"{cmd_name} complete.")
                 self._enqueue_log(f"[OPS] {cmd_name} finished.")
             except Exception as exc:
