@@ -189,6 +189,9 @@ struct RootMoveInfo {
       static_cast<int64_t>(-ScoreNone) * ScoreNone;
   int selDepth = 0;
   uint64_t effort = 0;
+  // Armageddon MCTS root statistics (Cardanobile/Joergoster)
+  int64_t zScore = 0;
+  int64_t visits = 0;
   std::vector<Move> pv;
 
   explicit RootMoveInfo(Move m) : move(m), pv(1, m) {}

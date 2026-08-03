@@ -2,13 +2,14 @@
 $env:Path += ";C:\msys64\mingw64\bin"
 
 $scenarios = @(
-    @{Name="Default"; Scenario="default"; Desc="Armageddon=OFF, Psychology=OFF, Fortress=OFF"},
-    @{Name="Armageddon Only"; Scenario="armageddon_only"; Desc="Armageddon=ON, Psychology=OFF, Fortress=OFF"},
-    @{Name="Armageddon + Psychology"; Scenario="armageddon_psychology"; Desc="Armageddon=ON, Psychology=ON, Fortress=OFF"},
-    @{Name="Fortress Only"; Scenario="fortress_only"; Desc="Armageddon=OFF, Psychology=OFF, Fortress=ON"},
-    @{Name="Fortress + Psychology"; Scenario="fortress_psychology"; Desc="Armageddon=OFF, Psychology=ON, Fortress=ON"},
-    @{Name="Armageddon + Fortress"; Scenario="armageddon_fortress"; Desc="Armageddon=ON, Psychology=OFF, Fortress=ON"},
-    @{Name="Armageddon + Psychology + Fortress"; Scenario="armageddon_psychology_fortress"; Desc="Armageddon=ON, Psychology=ON, Fortress=ON"}
+    @{Name="Default"; Scenario="default"; Desc="Armageddon=OFF, MCTS=OFF, Fortress=OFF"},
+    @{Name="Armageddon Only"; Scenario="armageddon_only"; Desc="Armageddon=ON, MCTS=OFF, Fortress=OFF"},
+    @{Name="Armageddon MCTS"; Scenario="armageddon_mcts"; Desc="Armageddon=OFF, MCTS=ON, Fortress=OFF"},
+    @{Name="Fortress Only"; Scenario="fortress_only"; Desc="Armageddon=OFF, MCTS=OFF, Fortress=ON"},
+    @{Name="MCTS + Fortress"; Scenario="mcts_fortress"; Desc="Armageddon=OFF, MCTS=ON, Fortress=ON"},
+    @{Name="Armageddon + Fortress"; Scenario="armageddon_fortress"; Desc="Armageddon=ON, MCTS=OFF, Fortress=ON"},
+    @{Name="Armageddon + MCTS + Fortress"; Scenario="armageddon_mcts_fortress"; Desc="Armageddon=ON, MCTS=ON, Fortress=ON"},
+    @{Name="MCTS + Experience"; Scenario="mcts_experience"; Desc="MCTS=ON, Experience=ON, Book=OFF"}
 )
 
 $results = @()
@@ -58,4 +59,3 @@ for ($i = 0; $i -lt $results.Count; $i++) {
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-

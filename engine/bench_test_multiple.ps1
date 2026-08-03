@@ -13,8 +13,8 @@ $inputFile = "bench_input_$Scenario.txt"
 switch ($Scenario) {
     "default" {
         @"
-setoption name Armageddon Mode value false
-setoption name Armageddon Psychology value false
+setoption name Armageddon value false
+setoption name Armageddon MCTS value false
 setoption name Fortress Detection value false
 bench
 quit
@@ -22,17 +22,17 @@ quit
     }
     "armageddon_only" {
         @"
-setoption name Armageddon Mode value true
-setoption name Armageddon Psychology value false
+setoption name Armageddon value true
+setoption name Armageddon MCTS value false
 setoption name Fortress Detection value false
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
     }
-    "armageddon_psychology" {
+    "armageddon_mcts" {
         @"
-setoption name Armageddon Mode value true
-setoption name Armageddon Psychology value true
+setoption name Armageddon value false
+setoption name Armageddon MCTS value true
 setoption name Fortress Detection value false
 bench
 quit
@@ -40,8 +40,8 @@ quit
     }
     "fortress_only" {
         @"
-setoption name Armageddon Mode value false
-setoption name Armageddon Psychology value false
+setoption name Armageddon value false
+setoption name Armageddon MCTS value false
 setoption name Fortress Detection value true
 bench
 quit
@@ -49,27 +49,38 @@ quit
     }
     "armageddon_fortress" {
         @"
-setoption name Armageddon Mode value true
-setoption name Armageddon Psychology value false
+setoption name Armageddon value true
+setoption name Armageddon MCTS value false
 setoption name Fortress Detection value true
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
     }
-    "armageddon_psychology_fortress" {
+    "armageddon_mcts_fortress" {
         @"
-setoption name Armageddon Mode value true
-setoption name Armageddon Psychology value true
+setoption name Armageddon value true
+setoption name Armageddon MCTS value true
 setoption name Fortress Detection value true
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
     }
-    "fortress_psychology" {
+    "mcts_fortress" {
         @"
-setoption name Armageddon Mode value false
-setoption name Armageddon Psychology value true
+setoption name Armageddon value false
+setoption name Armageddon MCTS value true
 setoption name Fortress Detection value true
+bench
+quit
+"@ | Out-File -FilePath $inputFile -Encoding ASCII
+    }
+    "mcts_experience" {
+        @"
+setoption name Armageddon value false
+setoption name Armageddon MCTS value true
+setoption name Fortress Detection value false
+setoption name Experience Enabled value true
+setoption name Experience Book value false
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
@@ -106,4 +117,3 @@ Remove-Item $inputFile -ErrorAction SilentlyContinue
 # Return values for parsing
 Write-Output "Nodes=$([math]::Round($avgNodes))"
 Write-Output "NPS=$([math]::Round($avgNPS))"
-

@@ -88,27 +88,10 @@ struct alignas(64) ThreadInfo {
   uint8_t searches = 0;
   volatile bool searching = false;
   uint8_t phase;
-  
-  // ============================================================================
-  // ARMAGEDDON CACHE: Performance optimization for expensive calculations
-  // ============================================================================
-  // Unified cache structure for all Armageddon mode calculations
-  struct ArmageddonCache {
-    uint64_t key = 0;          // Position Zobrist Key
-    int sharpness = -1;        // -1: Not calculated (replaces safe_moves - bitboard-based)
-    int complexity = -1;       // -1: Not calculated
-    int volatility = -1;       // -1: Not calculated
-    int pressure_bonus = -1;   // -1: Not calculated
-    
-    // Cache'i sıfırlama fonksiyonu (her yeni aramada veya make_move'da çağrılabilir)
-    void clear() {
-      key = 0;
-      sharpness = -1;
-      complexity = -1;
-      volatility = -1;
-      pressure_bonus = -1;
-    }
-  } armaCache;
+
+  // Armageddon MCTS per-thread sample counters (Cardanobile/Joergoster)
+  int64_t mctsVisits = 0;
+  int64_t mctsAllScores = 0;
   
   // ============================================================================
   // MATERIAL CACHE: Performance optimization for material calculations
@@ -198,15 +181,10 @@ void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   // ============================================================================
   // RESET ALL CACHES: New game, invalidate all caches
   // ============================================================================
-  thread_info.armaCache.clear();
   thread_info.materialCache.clear();
   thread_info.seeCache.clear();
-  
-  // ============================================================================
-  // RESET ARMAGEDDON CACHE: New game, invalidate cache (OPTIMIZED)
-  // ============================================================================
-  // OPTIMIZATION: Soft invalidation (just set key=0) instead of full clear()
-  thread_info.armaCache.key = 0;
+  thread_info.mctsVisits = 0;
+  thread_info.mctsAllScores = 0;
 }
 
 uint16_t get_hash_low_bits(uint64_t hash) {

@@ -244,7 +244,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     else if (command == "uci") {
       printf(
-          "id name Patricia 5.4\n"
+          "id name Patricia 5.5\n"
           "id author Adam Kulju, A.B. Gursu\n"
           "option name Hash type spin default 32 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
@@ -268,7 +268,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
           "option name Minimum Thinking Time type spin default 1 min 0 max 5000\n"
           "option name Fortress Detection type check default false\n"
           "option name Armageddon type check default false\n"
-          "option name Armageddon Psychology type check default false\n"
+          "option name Armageddon MCTS type check default false\n"
           "option name Armageddon TB Penalty type check default false\n"
           "option name Debug Logging type check default false\n");
 
@@ -462,14 +462,14 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Armageddon Psychology" ||
-               case_insensitive_compare(name, "Armageddon Psychology")) {
+      else if (name == "Armageddon MCTS" ||
+               case_insensitive_compare(name, "Armageddon MCTS")) {
         // The multi-word name was already parsed, "value" was already consumed
         std::string val;
         input_stream >> val; // true/false
         bool enabled = (val == "true");
-        set_armageddon_psychology(enabled);
-        printf("info string Armageddon Psychology is now: %s\n",
+        set_armageddon_mcts(enabled);
+        printf("info string Armageddon MCTS is now: %s\n",
                enabled ? "enabled" : "disabled");
         continue;
       }

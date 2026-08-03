@@ -23,8 +23,8 @@ constexpr int NormalizationFactor = 195;
 inline bool fortressDetectionEnabled = false; // UCI: Fortress Detection
 inline bool armageddonMode =
     false; // UCI: Armageddon (Base: Anti-Draw penalties)
-inline bool armageddonPsychology =
-    false; // UCI: Armageddon Psychology (Complexity/Sharpness bonuses)
+inline bool armageddonMcts =
+    false; // UCI: Armageddon MCTS (Cardanobile/Joergoster visit-score + playout)
 inline bool armageddonTbPenalty =
     false; // UCI: Armageddon TB Penalty (penalize even TB draws)
 
@@ -33,9 +33,7 @@ inline void set_fortress_detection(bool enabled) {
   fortressDetectionEnabled = enabled;
 }
 inline void set_armageddon_mode(bool enabled) { armageddonMode = enabled; }
-inline void set_armageddon_psychology(bool enabled) {
-  armageddonPsychology = enabled;
-}
+inline void set_armageddon_mcts(bool enabled) { armageddonMcts = enabled; }
 inline void set_armageddon_tb_penalty(bool enabled) {
   armageddonTbPenalty = enabled;
 }
@@ -43,8 +41,16 @@ inline void set_armageddon_tb_penalty(bool enabled) {
 // Getters for UCI options
 inline bool get_fortress_detection() { return fortressDetectionEnabled; }
 inline bool get_armageddon_mode() { return armageddonMode; }
-inline bool get_armageddon_psychology() { return armageddonPsychology; }
+inline bool get_armageddon_mcts() { return armageddonMcts; }
 inline bool get_armageddon_tb_penalty() { return armageddonTbPenalty; }
+
+// Sample an alpha-beta return into Armageddon MCTS root statistics.
+inline void mcts_sample(ThreadInfo &ti, int ply, int score) {
+  if (!armageddonMcts)
+    return;
+  ti.mctsVisits++;
+  ti.mctsAllScores += (ply % 2 == 0) ? score : -score;
+}
 
 // Armageddon draw penalty constant
 constexpr int ArmageddonPenalty = ScoreMate / 2;
@@ -674,423 +680,6 @@ int16_t total_mat_color(const Position &position, int color) {
   return m;
 }
 
-// ============================================================================
-// HIGH STAKES, HIGH NOISE: Pressure Index (Armageddon Mode Only)
-// ============================================================================
-
-// ============================================================================
-// ADIM 1: Complexity Faktörü (The Noise) - Returns 1-6 - CACHED VERSION
-// ============================================================================
-// Calculate position complexity (noise level) - normalized to 1-6 scale
-// NOTE: This is called from cached version, which already checks
-// armageddonPsychology NOTE: This function is only called when
-// armageddonPsychology is enabled Caller must check armageddonPsychology before
-// calling
-inline int calculate_complexity_noise_uncached(Position &position) {
-  int complexity = 0;
-
-  // 1. Vezir Faktörü: Vezirler tahtada ise kaos artar
-  int white_queens = position.material_count[8]; // WQueen
-  int black_queens = position.material_count[9]; // BQueen
-  if (white_queens > 0 && black_queens > 0) {
-    complexity += 2; // Both sides have queens
-  }
-
-  // 2. Açık Hatlar (Open Files): Taktiksel fırsatlar yaratır
-  uint64_t white_pawns_bb =
-      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::White];
-  uint64_t black_pawns_bb =
-      position.pieces_bb[PieceTypes::Pawn] & position.colors_bb[Colors::Black];
-  uint64_t all_pawns = white_pawns_bb | black_pawns_bb;
-
-  int open_files = 0;
-  for (int file = 0; file < 8; file++) {
-    if ((all_pawns & Files[file]) == 0) {
-      open_files++; // Açık hat - her iki tarafta da piyon yok
-    }
-  }
-  if (open_files >= 2) {
-    complexity += 2; // Çoklu açık hatlar
-  } else if (open_files == 1) {
-    complexity += 1; // Tek açık hat
-  }
-
-  // 3. Merkez Kontrolü: Merkezdeki taşlar pozisyonu daha karmaşık yapar
-  uint64_t center = (1ULL << e4) | (1ULL << e5) | (1ULL << d4) | (1ULL << d5);
-  uint64_t center_pieces =
-      (position.colors_bb[Colors::White] | position.colors_bb[Colors::Black]) &
-      center;
-  int center_count = pop_count(center_pieces);
-  if (center_count >= 3) {
-    complexity += 1; // Merkezde çok taş var
-  }
-
-  // 4. Materyal Dengesizliği: Taş sayıları eşit değilse (Fil vs At gibi)
-  int white_bishops = position.material_count[4];
-  int black_bishops = position.material_count[5];
-  int white_knights = position.material_count[2];
-  int black_knights = position.material_count[3];
-
-  // Sadece farklılık değil, büyük dengesizlik de önemli
-  int bishop_imbalance = abs(white_bishops - black_bishops);
-  int knight_imbalance = abs(white_knights - black_knights);
-  if (bishop_imbalance >= 2 || knight_imbalance >= 2) {
-    complexity += 2; // Büyük dengesizlik
-  } else if (bishop_imbalance > 0 || knight_imbalance > 0) {
-    complexity += 1; // Küçük dengesizlik
-  }
-
-  // 5. Piyon Tansiyonu: Karşılıklı vuruşan piyonlar
-  // Calculate pawn attacks
-  uint64_t white_pawn_attacks = 0;
-  uint64_t black_pawn_attacks = 0;
-
-  uint64_t temp_white = white_pawns_bb;
-  while (temp_white) {
-    int sq = pop_lsb(temp_white);
-    white_pawn_attacks |= PawnAttacks[Colors::White][sq];
-  }
-
-  uint64_t temp_black = black_pawns_bb;
-  while (temp_black) {
-    int sq = pop_lsb(temp_black);
-    black_pawn_attacks |= PawnAttacks[Colors::Black][sq];
-  }
-
-  // Check if pawns attack each other (tension)
-  if ((white_pawn_attacks & black_pawns_bb) ||
-      (black_pawn_attacks & white_pawns_bb)) {
-    complexity += 1; // Pawn tension detected
-  }
-
-  // Base Complexity (Min 1, Max 8) - NNUE ile uyumlu aralık
-  return std::max(1, std::min(complexity, 8));
-}
-
-// Cached version - use this in production
-// NOTE: Caller must check armageddonPsychology before calling this function
-// NOTE: This function is only called when armageddonPsychology is enabled
-// Caller must check armageddonPsychology before calling
-inline int calculate_complexity_noise(Position &position,
-                                      ThreadInfo &thread_info) {
-  // Cache Kontrolü
-  if (thread_info.armaCache.key == position.zobrist_key) {
-    if (thread_info.armaCache.complexity != -1) {
-      return thread_info.armaCache.complexity;
-    }
-  } else {
-    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
-    thread_info.armaCache.clear();
-    thread_info.armaCache.key = position.zobrist_key;
-  }
-
-  // Ağır Hesaplama (Sadece buraya düşerse yapılır)
-  int complexity = calculate_complexity_noise_uncached(position);
-
-  // Cache Yaz
-  thread_info.armaCache.complexity = complexity;
-  return complexity;
-}
-
-// Overload for backward compatibility (without ThreadInfo)
-inline int calculate_complexity_noise(Position &position) {
-  if (!armageddonPsychology)
-    return 1; // Default complexity when disabled
-  return calculate_complexity_noise_uncached(position);
-}
-
-// ============================================================================
-// PERFORMANCE OPTIMIZATION: Bitboard-based Sharpness Estimation
-// ============================================================================
-// Replaces expensive count_opponent_safe_moves() with fast bitboard operations
-// Calculates "Normalized Pseudo-Mobility" (AMP: Average Mobility Per Piece)
-// to estimate how "sharp" (restricted) the opponent's position is.
-// ============================================================================
-// Returns sharpness level: 0 (LOW) to 4 (EXTREME)
-// Uses only bitboard operations - NO move generation, NO SEE calculations
-// NOTE: This is called from cached version, which already checks
-// armageddonPsychology
-inline int estimate_sharpness_bitboard(const Position &position) {
-  // Get opponent's color (them)
-  int them = position.color ^ 1;
-  int us = position.color;
-  int sharpness = 0;
-
-  // 1. Mobility Restriction (mevcut - iyi)
-  // Payda: Piyon Olmayan Taş Sayısı (Non-Pawn Piece Count)
-  uint64_t their_pieces = position.colors_bb[them];
-  uint64_t their_pawns = their_pieces & position.pieces_bb[PieceTypes::Pawn];
-  uint64_t their_non_pawns = their_pieces & ~their_pawns;
-
-  int piece_count = pop_count(their_non_pawns);
-
-  // Eğer hiç subay yoksa sadece king safety'ye bak (Endgame veya Pawn War)
-  if (piece_count > 0) {
-    // Pay: Hareket Alanı (Mobility Area) - Bitboard Operations Only
-    uint64_t all_attacks = 0;
-    uint64_t occ =
-        position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
-
-    // Knights
-    uint64_t knights = their_non_pawns & position.pieces_bb[PieceTypes::Knight];
-    while (knights) {
-      int sq = pop_lsb(knights);
-      all_attacks |= KnightAttacks[sq];
-    }
-
-    // Bishops
-    uint64_t bishops = their_non_pawns & position.pieces_bb[PieceTypes::Bishop];
-    while (bishops) {
-      int sq = pop_lsb(bishops);
-      all_attacks |= get_bishop_attacks(sq, occ);
-    }
-
-    // Rooks
-    uint64_t rooks = their_non_pawns & position.pieces_bb[PieceTypes::Rook];
-    while (rooks) {
-      int sq = pop_lsb(rooks);
-      all_attacks |= get_rook_attacks(sq, occ);
-    }
-
-    // Queens (both bishop and rook attacks)
-    uint64_t queens = their_non_pawns & position.pieces_bb[PieceTypes::Queen];
-    while (queens) {
-      int sq = pop_lsb(queens);
-      all_attacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
-    }
-
-    // Kings
-    uint64_t kings = their_non_pawns & position.pieces_bb[PieceTypes::King];
-    while (kings) {
-      int sq = pop_lsb(kings);
-      all_attacks |= KingAttacks[sq];
-    }
-
-    // Remove squares occupied by opponent's own pieces (can't move there)
-    uint64_t safe_mobility = all_attacks & ~their_pieces;
-
-    // Count mobility squares
-    int mobility_squares = pop_count(safe_mobility);
-
-    // Hesaplama: Average Mobility Per Piece (AMP)
-    // AMP düştükçe sıkışıklık (Sharpness) artar
-    int amp = (mobility_squares > 0 && piece_count > 0)
-                  ? (mobility_squares / piece_count)
-                  : 0;
-
-    // Mobility-based sharpness
-    if (amp <= 2)
-      sharpness += 3; // EXTREME: Taşlar kımıldayamıyor
-    else if (amp <= 4)
-      sharpness += 2; // HIGH: Çok dar alan
-    else if (amp <= 6)
-      sharpness += 1; // MODERATE: Biraz baskı var
-  }
-
-  // 2. King Safety: Rakibin kralı ne kadar güvensiz?
-  int their_king_sq = get_king_pos(position, them);
-  if (their_king_sq != SqNone) {
-    uint64_t their_king_area =
-        KingAttacks[their_king_sq] | (1ULL << their_king_sq);
-
-    // Bizim taşlarımızın kral alanını tehdit eden saldırıları
-    uint64_t our_attacks_to_king = 0;
-    uint64_t our_pieces = position.colors_bb[us];
-
-    // Knights attacking king area
-    uint64_t our_knights = our_pieces & position.pieces_bb[PieceTypes::Knight];
-    while (our_knights) {
-      int sq = pop_lsb(our_knights);
-      if (KnightAttacks[sq] & their_king_area) {
-        our_attacks_to_king |= (1ULL << sq);
-      }
-    }
-
-    // Pawns attacking king area
-    uint64_t our_pawns = our_pieces & position.pieces_bb[PieceTypes::Pawn];
-    uint64_t our_pawn_attacks = 0;
-    uint64_t temp_pawns = our_pawns;
-    while (temp_pawns) {
-      int sq = pop_lsb(temp_pawns);
-      our_pawn_attacks |= PawnAttacks[us][sq];
-    }
-    if (our_pawn_attacks & their_king_area) {
-      sharpness += 1; // Piyonlar kralı tehdit ediyor
-    }
-
-    // Count pieces attacking king area
-    int attackers = pop_count(our_attacks_to_king);
-    if (attackers >= 2) {
-      sharpness += 1; // Çoklu taşlar kralı tehdit ediyor
-    }
-  }
-
-  // 3. Weak Pawns: Zayıf piyonlar pozisyonu keskinleştirir (basitleştirilmiş)
-  // Backward/isolated pawns kontrolü pahalı olabilir, bu yüzden sadece
-  // piyon sayısı dengesizliğine bakıyoruz
-  int white_pawn_count = pop_count(position.pieces_bb[PieceTypes::Pawn] &
-                                   position.colors_bb[Colors::White]);
-  int black_pawn_count = pop_count(position.pieces_bb[PieceTypes::Pawn] &
-                                   position.colors_bb[Colors::Black]);
-  int pawn_imbalance = abs(white_pawn_count - black_pawn_count);
-  if (pawn_imbalance >= 2) {
-    sharpness += 1; // Büyük piyon dengesizliği
-  }
-
-  return std::min(sharpness, 5); // Max 5 (NNUE ile uyumlu)
-}
-
-// ============================================================================
-// ADIM 2: Sharpness Faktörü (The Blade) - Returns 0-4 - CACHED VERSION
-// ============================================================================
-// Calculate how "sharp" the position is using fast bitboard estimation
-// OPTIMIZED: Uses estimate_sharpness_bitboard() instead of expensive move
-// generation NOTE: This function is only called when armageddonPsychology is
-// enabled Caller must check armageddonPsychology before calling
-inline int calculate_sharpness_level(Position &position,
-                                     ThreadInfo &thread_info) {
-  // Cache Kontrolü
-  if (thread_info.armaCache.key == position.zobrist_key) {
-    if (thread_info.armaCache.sharpness != -1) {
-      return thread_info.armaCache.sharpness;
-    }
-  } else {
-    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
-    thread_info.armaCache.clear();
-    thread_info.armaCache.key = position.zobrist_key;
-  }
-
-  // Fast bitboard-based calculation (NO move generation, NO SEE)
-  // No redundant armageddonPsychology check - caller already verified
-  int sharpness = estimate_sharpness_bitboard(position);
-
-  // Cache Yaz
-  thread_info.armaCache.sharpness = sharpness;
-  return sharpness;
-}
-
-// Overload for backward compatibility
-inline int calculate_sharpness_level(Position &position) {
-  if (!armageddonPsychology)
-    return 0;
-  return estimate_sharpness_bitboard(position);
-}
-
-// ============================================================================
-// ADIM 3: The Pressure Score (Büyük Birleşme) - CACHED VERSION
-// ============================================================================
-// Calculate pressure bonus: Sharpness * Complexity * Multiplier
-// NOTE: This function is only called when armageddonPsychology is enabled
-// Caller must check armageddonPsychology before calling
-inline int calculate_pressure_bonus(Position &position,
-                                    ThreadInfo &thread_info) {
-  // Cache Kontrolü
-  if (thread_info.armaCache.key == position.zobrist_key) {
-    if (thread_info.armaCache.pressure_bonus != -1) {
-      return thread_info.armaCache.pressure_bonus;
-    }
-  } else {
-    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
-    thread_info.armaCache.clear();
-    thread_info.armaCache.key = position.zobrist_key;
-  }
-
-  // Formül: Baskı = Keskinlik * Karmaşıklık (both cached)
-  // No redundant armageddonPsychology checks - caller already verified
-  int sharpness = calculate_sharpness_level(position, thread_info);
-  int complexity = calculate_complexity_noise(position, thread_info);
-
-  // Base pressure calculation
-  int base_pressure = sharpness * complexity;
-
-  // NNUE-compatible scaling: Daha sofistike ama makul aralıkta
-  // Eski: sharpness * complexity * 8 (max: 4*6*8 = 192 cp - çok yüksek!)
-  // Yeni: Daha dengeli scaling
-
-  int pressure_bonus = base_pressure * 4; // Base multiplier (daha konservatif)
-
-  // Exponential bonus for very high pressure (ama sınırlı)
-  if (base_pressure > 15) {
-    pressure_bonus += 20; // High pressure bonus (küçük ekstra)
-  }
-  if (base_pressure > 20) {
-    pressure_bonus += 15; // Extreme pressure bonus
-  }
-
-  // Game phase adjustment: Endgame'de daha az önemli
-  // NNUE zaten endgame'i iyi değerlendiriyor, bu yüzden psychology bonusunu
-  // azalt
-  if (thread_info.phase == PhaseTypes::Endgame) {
-    pressure_bonus = pressure_bonus * 3 / 4; // %25 azalt
-  }
-
-  // Cap the bonus to prevent it from overwhelming NNUE evaluation
-  // NNUE genellikle -1000 ile +1000 cp arasında değerler üretir
-  // Bu yüzden bonus maksimum 120 cp olmalı (NNUE'nun %12'si)
-  pressure_bonus = std::min(pressure_bonus, 120);
-
-  // Cache Yaz
-  thread_info.armaCache.pressure_bonus = pressure_bonus;
-  return pressure_bonus;
-}
-
-// Overload for backward compatibility
-inline int calculate_pressure_bonus(Position &position) {
-  if (!armageddonPsychology)
-    return 0;
-  int sharpness = calculate_sharpness_level(position);
-  int complexity = calculate_complexity_noise(position);
-
-  // Use same improved scaling as cached version (but without phase adjustment)
-  int base_pressure = sharpness * complexity;
-  int pressure_bonus = base_pressure * 4;
-
-  if (base_pressure > 15)
-    pressure_bonus += 20;
-  if (base_pressure > 20)
-    pressure_bonus += 15;
-
-  return std::min(pressure_bonus, 120);
-}
-
-// ============================================================================
-// MECHANISM 3: Advanced Complexity Bias (The "Chaos" Index) - DEPRECATED
-// ============================================================================
-// This is kept for backward compatibility but replaced by
-// calculate_pressure_bonus NOTE: This function is only called when
-// armageddonPsychology is enabled Caller must check armageddonPsychology before
-// calling
-inline int calculate_complexity(const Position &position,
-                                ThreadInfo &thread_info) {
-  // Use new pressure system instead (cached)
-  Position &pos = const_cast<Position &>(position);
-  return calculate_pressure_bonus(pos, thread_info);
-}
-
-// ============================================================================
-// THE RAZOR'S EDGE: Sharpness Heuristic (Armageddon Mode Only)
-// ============================================================================
-
-// Calculate sharpness bonus based on opponent's safe move count
-// DEPRECATED: Use calculate_pressure_bonus instead (which combines sharpness +
-// complexity) Note: This version doesn't have ThreadInfo, so it uses uncached
-// version
-inline int calculate_sharpness_bonus(Position &position) {
-  if (!armageddonMode)
-    return 0;
-
-  // Use new pressure system instead (uncached - for backward compatibility)
-  return calculate_pressure_bonus(position);
-}
-
-// ============================================================================
-// KATMAN 2: Singularity Exploitation - Detect when opponent is in singular
-// position
-// ============================================================================
-// This is handled in search() by checking if we're in a singular search
-// and if the opponent's best move is much better than alternatives
-// We'll add a bonus to the parent move when we detect singularity
-
 // Track if current position is singular (for parent bonus)
 inline bool is_singular_position(int best_score, int second_best_score,
                                  int depth) {
@@ -1101,148 +690,6 @@ inline bool is_singular_position(int best_score, int second_best_score,
   // Threshold: best should be at least (depth * 2) centipawns better
   int threshold = depth * 2;
   return (best_score - second_best_score) >= threshold;
-}
-
-// ============================================================================
-// KATMAN 3: Tactical Volatility Index - Measure position chaos - CACHED VERSION
-// ============================================================================
-// Calculate volatility based on hanging pieces, king exposure, passed pawns
-// OPTIMIZED: Only check major/minor pieces (skip pawns) to reduce computation
-// NOTE: This is called from cached version, which already checks
-// armageddonPsychology
-inline int calculate_tactical_volatility_uncached(Position &position) {
-  int volatility = 0;
-
-  // 1. Hanging Pieces (Boştaki Taşlar) - OPTIMIZED: Only check major/minor
-  // pieces Skip pawns as they're less critical and checking all pieces is
-  // expensive
-  uint64_t white_majors = (position.pieces_bb[PieceTypes::Rook] |
-                           position.pieces_bb[PieceTypes::Queen]) &
-                          position.colors_bb[Colors::White];
-  uint64_t white_minors = (position.pieces_bb[PieceTypes::Knight] |
-                           position.pieces_bb[PieceTypes::Bishop]) &
-                          position.colors_bb[Colors::White];
-  uint64_t black_majors = (position.pieces_bb[PieceTypes::Rook] |
-                           position.pieces_bb[PieceTypes::Queen]) &
-                          position.colors_bb[Colors::Black];
-  uint64_t black_minors = (position.pieces_bb[PieceTypes::Knight] |
-                           position.pieces_bb[PieceTypes::Bishop]) &
-                          position.colors_bb[Colors::Black];
-
-  int hanging_white = 0;
-  int hanging_black = 0;
-
-  // Check white major pieces (Rooks, Queens)
-  uint64_t pieces_to_check = white_majors;
-  while (pieces_to_check) {
-    int sq = pop_lsb(pieces_to_check);
-    uint64_t attackers = attacks_square(position, sq, Colors::Black);
-    uint64_t defenders = attacks_square(position, sq, Colors::White);
-
-    if (pop_count(attackers) > pop_count(defenders)) {
-      hanging_white++;
-    }
-  }
-
-  // Check white minor pieces (Knights, Bishops)
-  pieces_to_check = white_minors;
-  while (pieces_to_check) {
-    int sq = pop_lsb(pieces_to_check);
-    uint64_t attackers = attacks_square(position, sq, Colors::Black);
-    uint64_t defenders = attacks_square(position, sq, Colors::White);
-
-    if (pop_count(attackers) > pop_count(defenders)) {
-      hanging_white++;
-    }
-  }
-
-  // Check black major pieces
-  pieces_to_check = black_majors;
-  while (pieces_to_check) {
-    int sq = pop_lsb(pieces_to_check);
-    uint64_t attackers = attacks_square(position, sq, Colors::White);
-    uint64_t defenders = attacks_square(position, sq, Colors::Black);
-
-    if (pop_count(attackers) > pop_count(defenders)) {
-      hanging_black++;
-    }
-  }
-
-  // Check black minor pieces
-  pieces_to_check = black_minors;
-  while (pieces_to_check) {
-    int sq = pop_lsb(pieces_to_check);
-    uint64_t attackers = attacks_square(position, sq, Colors::White);
-    uint64_t defenders = attacks_square(position, sq, Colors::Black);
-
-    if (pop_count(attackers) > pop_count(defenders)) {
-      hanging_black++;
-    }
-  }
-
-  volatility += (hanging_white + hanging_black) *
-                8; // Reduced from 10 (NNUE compatibility)
-
-  // 2. King Exposure (Şah Açıklığı) - King attacks
-  int white_king_pos = get_king_pos(position, Colors::White);
-  int black_king_pos = get_king_pos(position, Colors::Black);
-
-  if (white_king_pos != SqNone && black_king_pos != SqNone) {
-    int white_king_attacks =
-        pop_count(attacks_square(position, white_king_pos, Colors::Black));
-    int black_king_attacks =
-        pop_count(attacks_square(position, black_king_pos, Colors::White));
-
-    volatility +=
-        (white_king_attacks + black_king_attacks) * 4; // Reduced from 5
-  }
-
-  // 3. Passed Pawns (Geçer Piyonlar) - Simplified check
-  // Count pawns that are advanced and not blocked
-  int white_pawns = position.material_count[0];
-  int black_pawns = position.material_count[1];
-
-  // Asymmetry in passed pawns increases volatility
-  int pawn_diff = abs(white_pawns - black_pawns);
-  if (pawn_diff >= 2) {
-    volatility += 12; // Reduced from 15, only for significant imbalance
-  } else if (pawn_diff > 0) {
-    volatility += 6; // Small imbalance
-  }
-
-  // Cap volatility to prevent it from overwhelming NNUE evaluation
-  // Max volatility should be around 80-100 cp (NNUE'nun %8-10'u)
-  return std::min(volatility, 100);
-}
-
-// Cached version - use this in production
-// NOTE: Caller must check armageddonPsychology before calling this function
-inline int calculate_tactical_volatility(Position &position,
-                                         ThreadInfo &thread_info) {
-  // Cache Kontrolü
-  if (thread_info.armaCache.key == position.zobrist_key) {
-    if (thread_info.armaCache.volatility != -1) {
-      return thread_info.armaCache.volatility;
-    }
-  } else {
-    // Yeni pozisyon -> Key güncelle ve diğer değerleri resetle
-    thread_info.armaCache.clear();
-    thread_info.armaCache.key = position.zobrist_key;
-  }
-
-  // Ağır Hesaplama (Sadece buraya düşerse yapılır)
-  int volatility = calculate_tactical_volatility_uncached(position);
-
-  // Cache Yaz
-  thread_info.armaCache.volatility = volatility;
-  return volatility;
-}
-
-// Overload for backward compatibility
-inline int calculate_tactical_volatility(Position &position) {
-  if (!armageddonPsychology)
-    return 0;
-  return calculate_tactical_volatility_uncached(position);
 }
 
 int eval(Position &position, ThreadInfo &thread_info) {
@@ -1333,14 +780,6 @@ int eval(Position &position, ThreadInfo &thread_info) {
   }
   eval = eval * multiplier;
 
-  // ============================================================================
-  // ARMAGEDDON PSYCHOLOGY: Opponent Mobility Squeeze (Quiet Forcing Moves)
-  // ============================================================================
-  // NEW APPROACH: No panic thresholds - Psychology is always active when
-  // enabled Goal: Reward positions where opponent has restricted mobility
-  // (quiet forcing moves) This is applied in move scoring, not in static
-  // evaluation (Static eval doesn't know which move led to this position)
-
   return std::clamp(eval + bonus1 + bonus2, ScoreLost + 1, ScoreWin - 1);
 }
 
@@ -1406,7 +845,6 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
   // After making a move, the position key changes, so all caches are invalid
   // OPTIMIZATION: Soft invalidation (just set key=0) instead of full clear()
   // Cache check will detect key mismatch and automatically invalidate
-  thread_info.armaCache.key = 0;
   thread_info.materialCache.key = 0;
   thread_info.materialCache.valid = false;
   thread_info.seeCache.key = 0;
@@ -1838,8 +1276,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // repetition
     if (upcoming_repetition(position, thread_info)) {
       int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-      if (drawValue >= beta)
+      if (drawValue >= beta) {
+        mcts_sample(thread_info, ply, drawValue);
         return drawValue;
+      }
       alpha = std::max(alpha, drawValue);
     }
   }
@@ -1851,8 +1291,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   if (fortressDetectionEnabled && !root &&
       upcoming_repetition(position, thread_info)) {
     int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-    if (drawValue >= beta)
+    if (drawValue >= beta) {
+      mcts_sample(thread_info, ply, drawValue);
       return drawValue;
+    }
 
     gameCycle = true;
     alpha = std::max(alpha, drawValue);
@@ -1865,7 +1307,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // At odd ply (opponent's turn): draw is good for them (+ArmageddonPenalty)
     // This ensures draws always propagate as bad for root side
     if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false, thread_info.phase);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
+      mcts_sample(thread_info, ply, drawValue);
+      return drawValue;
     }
 
     // Normal draw score with small randomization
@@ -1878,12 +1322,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       draw_score -= 50;
     }
 
+    mcts_sample(thread_info, ply, draw_score);
     return draw_score;
   }
 
   if (depth <= 0) {
-    return qsearch(alpha, beta, position, thread_info,
-                   TT); // drop into qsearch if depth is too low.
+    int qs = qsearch(alpha, beta, position, thread_info, TT);
+    mcts_sample(thread_info, ply, qs);
+    return qs; // drop into qsearch if depth is too low.
   }
   thread_info.nodes++;
 
@@ -1915,6 +1361,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   {
     beta = mate_distance;
     if (alpha >= beta) {
+      mcts_sample(thread_info, ply, beta);
       return beta;
     }
   }
@@ -1948,6 +1395,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     if ((entry_type == EntryTypes::Exact) ||
         (entry_type == EntryTypes::LBound && tt_score >= beta) ||
         (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
+      mcts_sample(thread_info, ply, tt_score);
       return tt_score;
     }
   }
@@ -2014,10 +1462,39 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   if (expCount)
     thread_info.tb_hits += expCount;
 
+  // Armageddon MCTS + Experience: per-node Exp-singular quiet pruning
+  // (Kelly SE idea). Local only — never sticky across nodes.
+  bool expSingular = false;
+  Move expSingularMove = MoveNone;
+  if (armageddonMcts && Learning::enabled() && !singular_search && expEx) {
+    int deepSons = 0;
+    Move onlyMove = MoveNone;
+    uint16_t onlyCount = 0;
+    for (const auto *e = expEx; e; e = e->next) {
+      if (e->depth >= depth) {
+        ++deepSons;
+        onlyMove = static_cast<Move>(e->move);
+        onlyCount = e->count;
+        if (deepSons > 1)
+          break;
+      }
+    }
+    if (deepSons == 1 && onlyCount > 6) {
+      expSingular = true;
+      expSingularMove = onlyMove;
+    }
+  }
+
   // Experience lookup with priority if deeper than TT
   if (!singular_search && Learning::enabled()) {
     const auto *bestExpEntry = Learning::find_best_entry(position.zobrist_key);
-    if (bestExpEntry && (!tt_hit || bestExpEntry->depth > tt_depth)) {
+    // When MCTS is on, still allow Exp cutoff/materialize after the first loop
+    // warmed TT from the same Exp data (otherwise Exp→mcts_sample never fires).
+    const bool expLookupOk =
+        bestExpEntry &&
+        (!tt_hit || bestExpEntry->depth > tt_depth ||
+         (armageddonMcts && bestExpEntry->depth >= depth));
+    if (expLookupOk) {
       const uint8_t expDepth = static_cast<uint8_t>(bestExpEntry->depth);
       const Move expMove = static_cast<Move>(bestExpEntry->move);
       const int32_t expValue = bestExpEntry->value;
@@ -2034,6 +1511,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
            (!is_cap(position, expMove) &&
             get_piece_type(position.board[extract_from(expMove)]) !=
                 PieceTypes::Pawn))) {
+        mcts_sample(thread_info, ply, expValue);
         return expValue;
       }
 
@@ -2105,6 +1583,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                                         : tb_score <= alpha)) {
       insert_entry(entry, hash, depth, MoveNone, ScoreNone,
                    score_to_tt(tb_score, ply), tb_bound, thread_info.searches);
+      mcts_sample(thread_info, ply, tb_score);
       return tb_score;
     }
 
@@ -2190,6 +1669,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         static_eval + 400 * depth < alpha) {
       score = qsearch(alpha, beta, position, thread_info, TT);
       if (score <= alpha) {
+        mcts_sample(thread_info, ply, score);
         return score;
       }
     }
@@ -2200,7 +1680,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     if (!skipForGameCycle && !kingDanger && depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
-      return (static_eval + beta) / 2;
+      int rfp = (static_eval + beta) / 2;
+      mcts_sample(thread_info, ply, rfp);
+      return rfp;
     }
 
     // Null Move Pruning (NMP): If we can give our opponent a free move and
@@ -2228,6 +1710,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         if (score >= ScoreWin) {
           score = beta;
         }
+        mcts_sample(thread_info, ply, score);
         return score;
       }
     }
@@ -2299,6 +1782,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                        score_to_tt(best_score, ply), EntryTypes::LBound,
                        thread_info.searches);
         }
+        mcts_sample(thread_info, ply, score);
         return score;
       }
     }
@@ -2355,46 +1839,16 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     is_capture = is_cap(position, move);
 
-    // ============================================================================
-    // ARMAGEDDON PSYCHOLOGY: Quiet Forcing Moves (Opponent Mobility Squeeze) -
-    // MOVE ORDERING
-    // ============================================================================
-    // NEW APPROACH: Reward quiet moves that restrict opponent's mobility in
-    // move ordering Only applies to QUIET moves (not captures) - these are
-    // "forcing" in a positional sense Goal: Force opponent into "only-move"
-    // situations through space restriction, not tactics NOTE: This is
-    // Psychology feature, not base Armageddon (draw penalties) OPTIMIZATION:
-    // Only calculate for quiet moves when Psychology is enabled
-    if (armageddonPsychology && !is_capture) {
-      // Create temporary position to check opponent's mobility after this move
-      Position temp_position = position;
-      make_move(temp_position, move);
-
-      // Check opponent's mobility squeeze level after our quiet move (fast
-      // bitboard calculation) estimate_sharpness_bitboard returns 0-5: higher =
-      // more restricted opponent
-      int opp_squeeze = estimate_sharpness_bitboard(temp_position);
-
-      // Bonus: The more we restrict opponent's mobility, the better
-      // This encourages quiet moves that force opponent into limited options
-      // Applied to hist_score for better move ordering
-      if (opp_squeeze >= 4) {
-        hist_score += 50; // Strong bonus - opponent extremely restricted
-                          // (EXTREME squeeze)
-      } else if (opp_squeeze >= 3) {
-        hist_score +=
-            35; // Good bonus - opponent highly restricted (HIGH squeeze)
-      } else if (opp_squeeze >= 2) {
-        hist_score += 20; // Moderate bonus - opponent moderately restricted
-      } else if (opp_squeeze >= 1) {
-        hist_score += 10; // Small bonus - opponent slightly restricted
-      }
-    }
-
     // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when
     // Fortress Detection enabled)
     if (fortressDetectionEnabled) {
       ss->quietMoveStreak = is_capture ? 0 : (ss - 1)->quietMoveStreak + 1;
+    }
+
+    // Armageddon MCTS + Experience: skip non-singular quiets after a few moves
+    if (!is_capture && !root && expSingular && move != expSingularMove &&
+        moves_played > 3) {
+      continue;
     }
 
     if (!is_capture && !is_pv && best_score > ScoreLost) {
@@ -2526,6 +1980,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
           // Multicut: If there was another move that beat beta, it's a sign
           // that we'll probably beat beta with a full search too.
 
+          mcts_sample(thread_info, ply, sBeta);
           return sBeta;
         } else if (cutnode) {
           extension = -1;
@@ -2638,6 +2093,14 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       rm->nodes += (thread_info.nodes - curr_nodes);
       rm->effort += (thread_info.nodes - curr_nodes);
 
+      // Armageddon MCTS: flush per-move visit/score samples into root move
+      if (armageddonMcts) {
+        rm->visits += thread_info.mctsVisits;
+        rm->zScore += thread_info.mctsAllScores;
+        thread_info.mctsVisits = 0;
+        thread_info.mctsAllScores = 0;
+      }
+
       rm->averageScore = rm->averageScore != ScoreNone
                              ? (score + rm->averageScore) / 2
                              : score;
@@ -2714,14 +2177,22 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   if (best_score == ScoreNone) { // handle no legal moves (stalemate/checkmate)
-    if (singular_search)
+    if (singular_search) {
+      mcts_sample(thread_info, ply, alpha);
       return alpha;
-    if (in_check)
-      return ply - ScoreMate; // Checkmate
+    }
+    if (in_check) {
+      int mate = ply - ScoreMate;
+      mcts_sample(thread_info, ply, mate);
+      return mate; // Checkmate
+    }
     // Stalemate - apply Armageddon penalty if enabled (FIX 2)
     if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false, thread_info.phase);
+      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
+      mcts_sample(thread_info, ply, drawValue);
+      return drawValue;
     }
+    mcts_sample(thread_info, ply, 0);
     return 0; // Normal stalemate = draw
   }
 
@@ -2846,7 +2317,55 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
                  thread_info.searches);
   }
 
+  mcts_sample(thread_info, ply, best_score);
   return best_score;
+}
+
+// Cardanobile playout: follow TT line with reduced-depth searches to fill TT
+// beyond the search horizon. Does not change bestmove selection.
+inline int armageddon_mcts_playout(Position &position, ThreadInfo &thread_info,
+                                   std::vector<TTBucket> &TT, Move playMove,
+                                   int playoutValue, int rootDepth) {
+  if (!armageddonMcts || thread_data.stop || thread_info.datagen_stop)
+    return ScoreNone;
+  if (playMove == MoveNone || !is_legal_fast_unchecked(position, playMove))
+    return ScoreNone;
+  if (is_draw(position, thread_info))
+    return 0;
+
+  const uint8_t phase = thread_info.phase;
+  Position moved = position;
+  make_move(moved, playMove);
+  update_nnue_state(thread_info, playMove, position, moved);
+  ss_push(position, thread_info, playMove);
+
+  int d = rootDepth * rootDepth / (rootDepth + 4) - 2;
+  int newDepth = std::max(1, d);
+
+  bool tt_hit = false;
+  TTEntry *tte =
+      &probe_entry(moved.zobrist_key, tt_hit, thread_info.searches, TT);
+
+  if (!tt_hit) {
+    std::array<Move, ListSize> legal_moves;
+    if (legal_movegen(moved, legal_moves) > 0) {
+      playoutValue =
+          -search<false>(-playoutValue, -playoutValue + 1, newDepth, true,
+                         moved, thread_info, TT);
+      tte = &probe_entry(moved.zobrist_key, tt_hit, thread_info.searches, TT);
+    }
+  }
+
+  Move ttMove = tt_hit ? tte->best_move : MoveNone;
+  if (ttMove != MoveNone && thread_info.search_ply < MaxSearchDepth - 2 &&
+      abs(playoutValue) < ScoreWin) {
+    playoutValue = -armageddon_mcts_playout(moved, thread_info, TT, ttMove,
+                                            -playoutValue, rootDepth);
+  }
+
+  ss_pop(thread_info);
+  thread_info.phase = phase;
+  return playoutValue;
 }
 
 void print_pv(Position &position, ThreadInfo &thread_info) {
@@ -3055,6 +2574,12 @@ void iterative_deepen(
 
     thread_info.current_iter = depth;
 
+    // Armageddon MCTS: reset per-iteration thread sample counters
+    if (armageddonMcts) {
+      thread_info.mctsVisits = 0;
+      thread_info.mctsAllScores = 0;
+    }
+
     int real_multi_pv =
         std::min<int>(thread_info.multipv, thread_info.root_moves.size());
 
@@ -3114,7 +2639,14 @@ void iterative_deepen(
         if (thread_data.stop || thread_info.datagen_stop)
           break;
 
-        if (score > alpha && score < beta)
+        // Armageddon MCTS: also fail low if visit-averaged score is weak
+        const bool mctsFailLow =
+            armageddonMcts && !thread_info.root_moves.empty() &&
+            thread_info.root_moves[0].visits > 0 &&
+            (thread_info.root_moves[0].zScore /
+             thread_info.root_moves[0].visits) <= (alpha - 50);
+
+        if (score > alpha && score < beta && !mctsFailLow)
           break;
 
         if (asp_iterations >= max_asp_iterations)
@@ -3155,7 +2687,7 @@ void iterative_deepen(
                  internal_to_uci(position, asp_move).c_str());
         }
 
-        if (score <= alpha) {
+        if (score <= alpha || mctsFailLow) {
           beta = (alpha + beta) / 2;
           alpha -= delta;
           temp_depth = std::max(1, depth - searchAgainReduction);
@@ -3357,6 +2889,19 @@ void iterative_deepen(
         thread_info.root_moves[0].pv[0] != lastBestMove) {
       lastBestMove = thread_info.root_moves[0].pv[0];
       lastBestMoveDepth = depth;
+    }
+
+    // Armageddon MCTS: Cardanobile playout after completed ID iteration
+    if (armageddonMcts && thread_info.thread_id == 0 &&
+        !thread_data.stop && !thread_info.datagen_stop &&
+        lastBestMove != MoveNone) {
+      int playoutScore = thread_info.root_moves.empty()
+                             ? 0
+                             : thread_info.root_moves[0].score;
+      if (playoutScore == ScoreNone)
+        playoutScore = 0;
+      armageddon_mcts_playout(position, thread_info, TT, lastBestMove,
+                              playoutScore, depth);
     }
 
     // Mate search stop (DIFF 17, HypnoS line 888)
