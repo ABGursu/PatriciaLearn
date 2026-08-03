@@ -1366,7 +1366,7 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
   if ((ss - 1)->played_move != MoveNone) {
     corr += thread_info.ContCorrHist[(ss - 2)->piece_moved][extract_to(
         (ss - 2)->played_move)][(ss - 1)->piece_moved]
-                                    [extract_to((ss - 2)->played_move)];
+                                    [extract_to((ss - 1)->played_move)];
   }
 
   return std::clamp(eval + (CorrWeight * corr / 512), ScoreLost + 1,
@@ -1729,7 +1729,7 @@ inline int qsearch(int alpha, int beta, Position &position,
     if (picker.stage > Stages::Captures && !in_check) {
       break;
     }
-    if (!is_legal(position, move)) {
+    if (!is_legal_fast_unchecked(position, move)) {
       continue;
     }
     moves_played++;
@@ -1927,7 +1927,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   int entry_type = EntryTypes::None, tt_static_eval = ScoreNone,
-      tt_score = ScoreNone, tt_move = MoveNone, tt_depth = 0;
+      tt_score = ScoreNone, tt_depth = 0;
+  Move tt_move = MoveNone;
 
   if (tt_hit) { // TT probe
     entry_type = entry.get_type();
@@ -2243,8 +2244,10 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   // ProbCut: Skip if gameCycle (only when Fortress Detection enabled)
   int p_beta = beta + ProbcutMargin;
-  if (!in_check && !skipForGameCycleIIR && depth >= 5 && abs(beta) < ScoreWin &&
-      (!tt_hit || tt_depth + 4 <= depth || tt_score >= p_beta)) {
+
+  if (cutnode && !skipForGameCycleIIR && abs(beta) < ScoreWin && depth > 4 &&
+      (tt_hit ? (tt_score >= p_beta && is_cap(position, tt_move))
+              : (static_eval >= beta))) {
 
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
@@ -2270,7 +2273,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       if (probcut_p.stage > Stages::Captures) {
         break;
       }
-      if (move == excluded_move || !is_legal(position, move)) {
+      if (move == excluded_move || !is_legal_fast_unchecked(position, move)) {
         continue;
       }
 
@@ -2281,6 +2284,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       int score =
           -qsearch(-p_beta, -p_beta + 1, moved_position, thread_info, TT);
+
       if (score >= p_beta) {
         score = -search<is_pv>(-p_beta, -p_beta + 1, depth - 4, false,
                                moved_position, thread_info, TT);
@@ -2290,6 +2294,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       thread_info.phase = phase;
 
       if (score >= p_beta) {
+        if (!singular_search) {
+          insert_entry(entry, hash, depth - 4, best_move, raw_eval,
+                       score_to_tt(best_score, ply), EntryTypes::LBound,
+                       thread_info.searches);
+        }
         return score;
       }
     }
@@ -2322,7 +2331,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     if (move == excluded_move) {
       continue;
     }
-    if (!is_legal(position, move)) {
+    if (!is_legal_fast_unchecked(position, move)) {
       continue;
     }
 
@@ -2416,7 +2425,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     if (!root && best_score > ScoreLost && depth < SeePruningDepth) {
 
-      int margin = is_capture ? SeePruningQuietMargin : SeePruningNoisyMargin;
+      int margin = is_capture ? SeePruningNoisyMargin : SeePruningQuietMargin;
 
       if (!SEE_cached(position, move, depth * margin, thread_info)) {
         // SEE pruning: if we are hanging material, prune under certain
@@ -2825,7 +2834,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       update_corrhist(
           thread_info.ContCorrHist[(ss - 2)->piece_moved][extract_to(
               (ss - 2)->played_move)][(ss - 1)->piece_moved]
-                                  [extract_to((ss - 2)->played_move)],
+                                  [extract_to((ss - 1)->played_move)],
           bonus);
     }
   }
@@ -2889,8 +2898,10 @@ void iterative_deepen(
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
   thread_info.bestMoveChanges = 0;
-  thread_info.nnue_state.reset_nnue(position, total_mat(position, thread_info) <
-                                                  PhaseBound);
+  thread_info.phase = total_mat(position, thread_info) < PhaseBound
+                          ? PhaseTypes::Endgame
+                          : PhaseTypes::Sacrifice;
+  thread_info.nnue_state.reset_nnue(position, thread_info.phase);
   calculate(position);
   thread_info.nodes = 0;
   thread_info.tb_hits = 0;
@@ -2900,9 +2911,6 @@ void iterative_deepen(
     thread_info.iterValue.fill(0);
   else
     thread_info.iterValue.fill(thread_info.bestPreviousScore);
-  thread_info.phase = total_mat(position, thread_info) < PhaseBound
-                          ? PhaseTypes::Endgame
-                          : PhaseTypes::Sacrifice;
   thread_info.search_ply = 0; // reset all relevant thread_info
   thread_info.excluded_move = MoveNone;
   thread_info.best_moves = {0};
@@ -3031,6 +3039,11 @@ void iterative_deepen(
   double totBestMoveChanges = 0;
   double lastTimeReduction = 1.0;
   int searchAgainCounter = 0;
+
+  // Short rolling window of recently completed iteration scores, used to
+  // smooth out single-iteration noise in the score-drop time factor.
+  std::array<int, 3> score_hist{};
+  int score_hist_count = 0;
 
   for (int depth = 1; depth <= thread_info.max_iter_depth; depth++) {
 
@@ -3266,10 +3279,21 @@ void iterative_deepen(
           }
 
           double timeReductionResult;
+          const int tm_score = thread_info.root_moves[0].score;
+          int avg_prev_score = tm_score;
+          if (score_hist_count > 0) {
+            int n = std::min<int>(score_hist_count, score_hist.size());
+            int sum = 0;
+            for (int i = 0; i < n; i++) {
+              sum += score_hist[i];
+            }
+            avg_prev_score = sum / n;
+          }
           double totalTime = compute_soft_limit(
-              thread_info, depth, thread_info.root_moves[0].score, iterIdx,
+              thread_info, depth, tm_score, iterIdx,
               lastBestMoveDepth, totBestMoveChanges,
-              thread_data.num_threads, timeReductionResult);
+              thread_data.num_threads, timeReductionResult, tm_score,
+              avg_prev_score);
           lastTimeReduction = timeReductionResult;
 
           thread_info.opt_time = static_cast<uint32_t>(
@@ -3300,6 +3324,9 @@ void iterative_deepen(
             thread_data.stop = true;
           }
         }
+
+        score_hist[score_hist_count % score_hist.size()] = score;
+        score_hist_count++;
 
         if (depth >= 6 && total_mat(position) >= PhaseBound) {
           if (thread_info.best_scores[0] < -20) {

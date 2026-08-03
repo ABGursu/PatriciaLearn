@@ -1,6 +1,8 @@
 #pragma once
 #include "defs.h"
 #include "utils.h"
+#include "params.h"
+#include <algorithm>
 #include <cmath>
 
 // HypnoS-identical multi-factor soft limit computation.
@@ -11,7 +13,14 @@
 double compute_soft_limit(ThreadInfo &thread_info, int depth, int bestValue,
                           int iterIdx, int lastBestMoveDepth,
                           double totBestMoveChanges, int num_threads,
-                          double &outTimeReduction) {
+                          double &outTimeReduction, int score,
+                          int prev_score) {
+
+  // Don't adjust time for infinite/depth/movetime searches.
+  if (thread_info.original_opt >= INT32_MAX / 2) {
+    outTimeReduction = thread_info.previousTimeReduction;
+    return static_cast<double>(thread_info.original_opt);
+  }
 
   int prevAvgScore = thread_info.bestPreviousAverageScore != ScoreNone
                          ? thread_info.bestPreviousAverageScore
@@ -39,8 +48,14 @@ double compute_soft_limit(ThreadInfo &thread_info, int depth, int bestValue,
       thread_info.root_moves[0].effort * 100000 / totalNodes;
   double highBestMoveEffort = nodesEffort >= 93340 ? 0.76 : 1.0;
 
+  // If the score dropped since the last iteration, the position likely got
+  // more critical, so allocate extra time; if it rose, allocate less.
+  double score_factor =
+      std::clamp(1.0 + (prev_score - score) / (double)ScoreDropDiv,
+                 ScoreDropMin / 100.0, ScoreDropMax / 100.0);
+
   double totalTime = thread_info.original_opt * fallingEval * reduction *
-                     bestMoveInstability * highBestMoveEffort;
+                     bestMoveInstability * highBestMoveEffort * score_factor;
 
   if (thread_info.root_moves.size() == 1)
     totalTime = std::min(502.0, totalTime);
