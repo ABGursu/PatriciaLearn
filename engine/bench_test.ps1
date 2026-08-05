@@ -14,7 +14,7 @@ switch ($Scenario) {
         @"
 setoption name Armageddon value false
 setoption name Armageddon MCTS value false
-setoption name Fortress Detection value false
+setoption name Armageddon Draw Detection value false
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
@@ -23,7 +23,7 @@ quit
         @"
 setoption name Armageddon value true
 setoption name Armageddon MCTS value false
-setoption name Fortress Detection value false
+setoption name Armageddon Draw Detection value false
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
@@ -32,43 +32,7 @@ quit
         @"
 setoption name Armageddon value false
 setoption name Armageddon MCTS value true
-setoption name Fortress Detection value false
-bench
-quit
-"@ | Out-File -FilePath $inputFile -Encoding ASCII
-    }
-    "fortress_only" {
-        @"
-setoption name Armageddon value false
-setoption name Armageddon MCTS value false
-setoption name Fortress Detection value true
-bench
-quit
-"@ | Out-File -FilePath $inputFile -Encoding ASCII
-    }
-    "armageddon_fortress" {
-        @"
-setoption name Armageddon value true
-setoption name Armageddon MCTS value false
-setoption name Fortress Detection value true
-bench
-quit
-"@ | Out-File -FilePath $inputFile -Encoding ASCII
-    }
-    "armageddon_mcts_fortress" {
-        @"
-setoption name Armageddon value true
-setoption name Armageddon MCTS value true
-setoption name Fortress Detection value true
-bench
-quit
-"@ | Out-File -FilePath $inputFile -Encoding ASCII
-    }
-    "mcts_fortress" {
-        @"
-setoption name Armageddon value false
-setoption name Armageddon MCTS value true
-setoption name Fortress Detection value true
+setoption name Armageddon Draw Detection value false
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII
@@ -77,9 +41,27 @@ quit
         @"
 setoption name Armageddon value false
 setoption name Armageddon MCTS value true
-setoption name Fortress Detection value false
+setoption name Armageddon Draw Detection value false
 setoption name Experience Enabled value true
 setoption name Experience Book value false
+bench
+quit
+"@ | Out-File -FilePath $inputFile -Encoding ASCII
+    }
+    "add_only" {
+        @"
+setoption name Armageddon value false
+setoption name Armageddon MCTS value false
+setoption name Armageddon Draw Detection value true
+bench
+quit
+"@ | Out-File -FilePath $inputFile -Encoding ASCII
+    }
+    "armageddon_add" {
+        @"
+setoption name Armageddon value true
+setoption name Armageddon MCTS value false
+setoption name Armageddon Draw Detection value true
 bench
 quit
 "@ | Out-File -FilePath $inputFile -Encoding ASCII

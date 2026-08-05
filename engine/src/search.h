@@ -1,4 +1,5 @@
 #pragma once
+#include "draw_detect.h"
 #include "fathom/src/tbprobe.h"
 #include "learning.h"
 #include "movepick.h"
@@ -16,33 +17,38 @@
 constexpr int NormalizationFactor = 195;
 
 // ============================================================================
-// FORTRESS DETECTION & ARMAGEDDON MODE (Crystal/HypnoS port)
+// ARMAGEDDON MODE
 // ============================================================================
 
 // Global UCI option variables
-inline bool fortressDetectionEnabled = false; // UCI: Fortress Detection
 inline bool armageddonMode =
     false; // UCI: Armageddon (Base: Anti-Draw penalties)
 inline bool armageddonMcts =
     false; // UCI: Armageddon MCTS (Cardanobile/Joergoster visit-score + playout)
 inline bool armageddonTbPenalty =
     false; // UCI: Armageddon TB Penalty (penalize even TB draws)
+inline bool armageddonDrawDetection =
+    false; // UCI: Armageddon Draw Detection (Crystal+BlackHole)
 
 // Setters for UCI options
-inline void set_fortress_detection(bool enabled) {
-  fortressDetectionEnabled = enabled;
-}
 inline void set_armageddon_mode(bool enabled) { armageddonMode = enabled; }
 inline void set_armageddon_mcts(bool enabled) { armageddonMcts = enabled; }
 inline void set_armageddon_tb_penalty(bool enabled) {
   armageddonTbPenalty = enabled;
 }
+inline void set_armageddon_draw_detection(bool enabled) {
+  armageddonDrawDetection = enabled;
+}
 
 // Getters for UCI options
-inline bool get_fortress_detection() { return fortressDetectionEnabled; }
 inline bool get_armageddon_mode() { return armageddonMode; }
 inline bool get_armageddon_mcts() { return armageddonMcts; }
 inline bool get_armageddon_tb_penalty() { return armageddonTbPenalty; }
+inline bool get_armageddon_draw_detection() { return armageddonDrawDetection; }
+
+inline bool add_detection_active(const ThreadInfo &ti) {
+  return armageddonDrawDetection && ti.multipv == 1;
+}
 
 // Sample an alpha-beta return into Armageddon MCTS root statistics.
 inline void mcts_sample(ThreadInfo &ti, int ply, int score) {
@@ -440,62 +446,6 @@ inline bool would_cause_repetition_after_move(const Position &position,
   return false;
 }
 
-// ============================================================================
-// KING DANGER DETECTION (Crystal port - Fortress Detection helper)
-// ============================================================================
-// Checks if the king is in a dangerous position (few legal squares, many
-// attackers) This helps detect "fortress" positions where draws are likely
-// IMPROVEMENT 4: Enhanced detection with attacker position analysis
-inline bool king_danger(const Position &position, int color) {
-  if (!fortressDetectionEnabled)
-    return false;
-
-  int ksq = get_king_pos(position, color);
-  uint64_t occ =
-      position.colors_bb[Colors::White] | position.colors_bb[Colors::Black];
-  uint64_t own_pieces = position.colors_bb[color];
-  int enemy = color ^ 1;
-
-  // Get king ring (squares around the king)
-  uint64_t king_ring = KingAttacks[ksq];
-  uint64_t original_king_ring = king_ring;
-
-  int king_attackers_count = 0;
-  int legal_king_count = 0;
-
-  while (king_ring) {
-    int to = pop_lsb(king_ring);
-
-    // Get all enemy attackers to this square (as bitboard)
-    uint64_t enemy_attackers = attacks_square(position, to, enemy);
-
-    if (!enemy_attackers) {
-      // Square is safe, check if we can move there
-      if (!(own_pieces & (1ULL << to))) {
-        legal_king_count++;
-      }
-    } else {
-      // Count attackers that are OUTSIDE king ring OR multiple attackers
-      uint64_t temp_attackers = enemy_attackers;
-      while (temp_attackers) {
-        int attacker_sq = pop_lsb(temp_attackers);
-        bool outside_ring = !(original_king_ring & (1ULL << attacker_sq));
-        // Check if there are multiple attackers (more than just this one)
-        bool multiple_attackers =
-            (enemy_attackers & ~(1ULL << attacker_sq)) != 0;
-
-        if (outside_ring || multiple_attackers) {
-          king_attackers_count++;
-        }
-      }
-    }
-  }
-
-  // King is in danger if restricted AND under attack
-  return (king_attackers_count > 1 && legal_king_count < 2) ||
-         (king_attackers_count > 0 && legal_king_count == 0);
-}
-
 void update_history(int16_t &entry, int score) { // Update history score
   entry += score - entry * abs(score) / 16384;
 }
@@ -599,6 +549,22 @@ inline int16_t material_eval(const Position &position,
 // Overload for backward compatibility (without ThreadInfo)
 inline int16_t material_eval(const Position &position) {
   return material_eval_uncached(position);
+}
+
+// Single door for draw conclusions (ADD + Armageddon + normal Patricia).
+// Armageddon ON -> penalty (TB rules via tb_draw). OFF -> Patricia normal draw.
+inline int current_draw_score(const Position &pos, ThreadInfo &ti, int ply,
+                              bool tb_draw = false) {
+  if (armageddonMode)
+    return get_draw_value_armageddon(ply, tb_draw, ti.phase);
+
+  int draw_score = 1 - (ti.nodes & 3);
+  int material = material_eval(pos, ti);
+  if (material < -100)
+    draw_score += 50;
+  else if (material > 100)
+    draw_score -= 50;
+  return draw_score;
 }
 
 // ============================================================================
@@ -1048,35 +1014,36 @@ inline int qsearch(int alpha, int beta, Position &position,
 
   int ply = thread_info.search_ply;
 
-  // Crystal: gameCycle detection in qsearch (ONLY when Fortress Detection is
-  // enabled)
+  const bool addActive = add_detection_active(thread_info);
   bool gameCycle = false;
 
   // ============================================================================
-  // ARMAGEDDON: Standalone upcoming repetition check (independent of Fortress)
+  // Upcoming repetition: Armageddon alone, or ADD (gameCycle) path
   // ============================================================================
-  if (armageddonMode && !fortressDetectionEnabled) {
-    // When Armageddon is ON but Fortress is OFF, still check upcoming
-    // repetition
+  if (addActive) {
     if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
+      int drawValue = current_draw_score(position, thread_info, ply);
+      if (drawValue >= beta)
+        return drawValue;
+      gameCycle = true;
+      alpha = std::max(alpha, drawValue);
+    }
+  } else if (armageddonMode) {
+    if (upcoming_repetition(position, thread_info)) {
+      int drawValue = current_draw_score(position, thread_info, ply);
       if (drawValue >= beta)
         return drawValue;
       alpha = std::max(alpha, drawValue);
     }
   }
 
-  // Fortress Detection: gameCycle check (sets gameCycle flag for pruning
-  // decisions)
-  if (fortressDetectionEnabled) {
-    if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-      if (drawValue >= beta)
-        return drawValue;
-
-      gameCycle = true;
-      alpha = std::max(alpha, drawValue);
-    }
+  // ADD BlackHole: score confirmed drawish shallow branches
+  if (addActive && thread_info.addBlackHole &&
+      DrawDetect::drawish_branch(position, thread_info, ply,
+                                 thread_info.addBlackHole,
+                                 thread_info.addStrongerSide,
+                                 thread_info.addTestPassivePlay != 0)) {
+    return current_draw_score(position, thread_info, ply);
   }
 
   // NOTE: Original Patricia qsearch has NO is_draw check here
@@ -1108,8 +1075,7 @@ inline int qsearch(int alpha, int beta, Position &position,
     tt_move = entry.best_move;
   }
 
-  // Skip TT cutoff if gameCycle (only when Fortress Detection enabled)
-  if (tt_score != ScoreNone && !(fortressDetectionEnabled && gameCycle)) {
+  if (tt_score != ScoreNone && !gameCycle) {
     if ((entry_type == EntryTypes::Exact) ||
         (entry_type == EntryTypes::LBound && tt_score >= beta) ||
         (entry_type == EntryTypes::UBound && tt_score <= alpha)) {
@@ -1209,11 +1175,7 @@ inline int qsearch(int alpha, int beta, Position &position,
     if (in_check) {
       return ply - ScoreMate; // Checkmate
     }
-    // Stalemate - apply Armageddon penalty if enabled (FIX 2)
-    if (armageddonMode) {
-      return get_draw_value_armageddon(ply, false, thread_info.phase);
-    }
-    return 0; // Normal stalemate = draw
+    return current_draw_score(position, thread_info, ply);
   }
 
   // insert entries and return
@@ -1242,23 +1204,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   bool root = !ply;
   int color = position.color;
 
-  // ============================================================================
-  // GAME CYCLE DETECTION (Crystal port - ONLY when Fortress Detection enabled)
-  // ============================================================================
-  bool gameCycle = false;
-  bool kingDanger = false;
-  bool kingDangerThem = false;
-
-  // Check for king danger (Fortress Detection)
-  // IMPROVEMENT 2: Check both our king and opponent's king danger
-  if (fortressDetectionEnabled && !root) {
-    bool ourMove = !(ply & 1); // Even ply = our move (root side)
-    // Check our king danger when it's opponent's move
-    kingDanger = !ourMove && king_danger(position, color);
-    // Check opponent's king danger when it's our move
-    kingDangerThem = ourMove && king_danger(position, color ^ 1);
-  }
-
   if (ply > thread_info.seldepth) {
     thread_info.seldepth = ply;
   }
@@ -1268,14 +1213,27 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     return correct_eval(position, thread_info, eval(position, thread_info));
   }
 
+  const bool addActive = add_detection_active(thread_info);
+  bool gameCycle = false;
+  bool kingDanger = false;
+  bool kingDangerThem = false;
+
   // ============================================================================
-  // ARMAGEDDON: Standalone upcoming repetition check (independent of Fortress)
+  // Upcoming repetition: ADD owns gameCycle path; Armageddon-alone stays simple
   // ============================================================================
-  if (armageddonMode && !fortressDetectionEnabled && !root) {
-    // When Armageddon is ON but Fortress is OFF, still check upcoming
-    // repetition
+  if (!root && addActive) {
     if (upcoming_repetition(position, thread_info)) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
+      int drawValue = current_draw_score(position, thread_info, ply);
+      if (drawValue >= beta) {
+        mcts_sample(thread_info, ply, drawValue);
+        return drawValue;
+      }
+      gameCycle = true;
+      alpha = std::max(alpha, drawValue);
+    }
+  } else if (armageddonMode && !root) {
+    if (upcoming_repetition(position, thread_info)) {
+      int drawValue = current_draw_score(position, thread_info, ply);
       if (drawValue >= beta) {
         mcts_sample(thread_info, ply, drawValue);
         return drawValue;
@@ -1284,46 +1242,29 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
-  // ============================================================================
-  // UPCOMING REPETITION CHECK (Crystal gameCycle - ONLY when Fortress Detection
-  // enabled)
-  // ============================================================================
-  if (fortressDetectionEnabled && !root &&
-      upcoming_repetition(position, thread_info)) {
-    int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-    if (drawValue >= beta) {
-      mcts_sample(thread_info, ply, drawValue);
-      return drawValue;
-    }
+  // Crystal king_danger (ADD only)
+  if (addActive && !root) {
+    bool ourMove = !(ply & 1);
+    kingDanger = !ourMove && DrawDetect::king_danger(position, color);
+    kingDangerThem = ourMove && DrawDetect::king_danger(position, color ^ 1);
+  }
 
-    gameCycle = true;
-    alpha = std::max(alpha, drawValue);
+  // ADD BlackHole: score confirmed drawish shallow branches
+  if (addActive && !root && depth < 4 &&
+      DrawDetect::drawish_branch(position, thread_info, ply,
+                                 thread_info.addBlackHole,
+                                 thread_info.addStrongerSide,
+                                 thread_info.addTestPassivePlay != 0)) {
+    int drawValue = current_draw_score(position, thread_info, ply);
+    mcts_sample(thread_info, ply, drawValue);
+    return drawValue;
   }
 
   // Standard draw detection (50-move, material, repetition)
   if (ply && is_draw(position, thread_info)) {
-    // Armageddon mode: heavy penalty for draws (perspective-aware)
-    // At even ply (our turn): draw is bad for us (-ArmageddonPenalty)
-    // At odd ply (opponent's turn): draw is good for them (+ArmageddonPenalty)
-    // This ensures draws always propagate as bad for root side
-    if (armageddonMode) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-      mcts_sample(thread_info, ply, drawValue);
-      return drawValue;
-    }
-
-    // Normal draw score with small randomization
-    int draw_score = 1 - (thread_info.nodes & 3);
-    int material = material_eval(position, thread_info);
-
-    if (material < -100) {
-      draw_score += 50;
-    } else if (material > 100) {
-      draw_score -= 50;
-    }
-
-    mcts_sample(thread_info, ply, draw_score);
-    return draw_score;
+    int drawValue = current_draw_score(position, thread_info, ply);
+    mcts_sample(thread_info, ply, drawValue);
+    return drawValue;
   }
 
   if (depth <= 0) {
@@ -1385,10 +1326,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     tt_depth = entry.depth;
   }
 
-  // Skip TT cutoff if gameCycle is detected (only when Fortress Detection
-  // enabled)
-  if (tt_score != ScoreNone && !is_pv &&
-      !(fortressDetectionEnabled && gameCycle) && tt_depth >= depth) {
+  if (tt_score != ScoreNone && !is_pv && !gameCycle && tt_depth >= depth) {
     // If we get a useful score from the TT and it's
     // searched to at least the same depth we would
     // have searched, then we can return
@@ -1661,9 +1599,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   if (!is_pv && !in_check && !singular_search) {
 
-    // Skip pruning if gameCycle is detected (only when Fortress Detection
-    // enabled)
-    bool skipForGameCycle = fortressDetectionEnabled && gameCycle;
+    const bool skipForGameCycle = addActive && gameCycle;
 
     if (!skipForGameCycle && alpha < 2000 && depth < 5 &&
         static_eval + 400 * depth < alpha) {
@@ -1676,7 +1612,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     // Reverse Futility Pruning (RFP): If our position is way better than beta,
     // we're likely good to stop searching the node.
-    // Skip if gameCycle or kingDanger (only when Fortress Detection enabled)
 
     if (!skipForGameCycle && !kingDanger && depth <= RFPMaxDepth &&
         static_eval - RFPMargin * (depth - improving) >= beta) {
@@ -1687,7 +1622,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     // Null Move Pruning (NMP): If we can give our opponent a free move and
     // still beat beta on a reduced search, we can prune the node.
-    // Skip if gameCycle (only when Fortress Detection enabled)
 
     if (!skipForGameCycle && static_eval >= beta && depth >= NMPMinDepth &&
         has_non_pawn_material(position, color) &&
@@ -1718,37 +1652,27 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   // Internal Iterative Reduction: If we are in a PV node and have no TT move,
   // reduce the depth.
-  // Skip if gameCycle (only when Fortress Detection enabled)
-  bool skipForGameCycleIIR = fortressDetectionEnabled && gameCycle;
   if ((is_pv || cutnode) && tt_move == MoveNone && depth > IIRMinDepth &&
-      !skipForGameCycleIIR) {
+      !(addActive && gameCycle)) {
     depth--;
   }
 
-  // ProbCut: Skip if gameCycle (only when Fortress Detection enabled)
   int p_beta = beta + ProbcutMargin;
 
-  if (cutnode && !skipForGameCycleIIR && abs(beta) < ScoreWin && depth > 4 &&
+  if (cutnode && !(addActive && gameCycle) && abs(beta) < ScoreWin &&
+      depth > 4 &&
       (tt_hit ? (tt_score >= p_beta && is_cap(position, tt_move))
               : (static_eval >= beta))) {
 
     int threshold = p_beta - static_eval;
     MovePicker probcut_p;
     init_picker(probcut_p, position, threshold, in_check, ss);
-    // Original Patricia uses SEE check; Crystal removes it (only when Fortress
-    // Detection enabled)
-    Move p_tt_move;
-    if (fortressDetectionEnabled) {
-      // Crystal commit af181: Simplified - just check if tt_move is capture
-      p_tt_move = (tt_move != MoveNone && is_cap(position, tt_move)) ? tt_move
-                                                                     : MoveNone;
-    } else {
-      // Original Patricia: use SEE check (CACHED)
-      p_tt_move = (tt_move != MoveNone &&
-                   SEE_cached(position, tt_move, threshold, thread_info))
-                      ? tt_move
-                      : MoveNone;
-    }
+    // Original Patricia: use SEE check (CACHED)
+    Move p_tt_move =
+        (tt_move != MoveNone &&
+         SEE_cached(position, tt_move, threshold, thread_info))
+            ? tt_move
+            : MoveNone;
 
     while (Move move =
                next_move(probcut_p, position, thread_info, p_tt_move, true)) {
@@ -1839,12 +1763,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     is_capture = is_cap(position, move);
 
-    // Crystal commit 901ad: quietMoveStreak - reset only on capture (ONLY when
-    // Fortress Detection enabled)
-    if (fortressDetectionEnabled) {
-      ss->quietMoveStreak = is_capture ? 0 : (ss - 1)->quietMoveStreak + 1;
-    }
-
     // Armageddon MCTS + Experience: skip non-singular quiets after a few moves
     if (!is_capture && !root && expSingular && move != expSingularMove &&
         moves_played > 3) {
@@ -1890,14 +1808,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     int extension = 0;
 
-    // Crystal: gameCycleExtension - extend when in game cycle to find escape
-    // (ONLY when Fortress Detection enabled)
-    if (fortressDetectionEnabled && gameCycle) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-      bool gameCycleExtension = is_pv || (ply > 2 && drawValue < 0);
-      if (gameCycleExtension) {
+    // Crystal gameCycle extension (ADD): search harder for an escape
+    if (addActive && gameCycle) {
+      int drawValue = current_draw_score(position, thread_info, ply);
+      if (is_pv || (ply > 2 && drawValue < 0))
         extension = 2;
-      }
     }
 
     // ============================================================================
@@ -1906,7 +1821,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // When in Armageddon mode and position is drawish, extend to find winning
     // resources OPTIMIZATION: Use key_after_move instead of Position copy to
     // avoid expensive copy
-    if (armageddonMode && !fortressDetectionEnabled && extension == 0) {
+    if (armageddonMode && extension == 0) {
       // Check if position is drawish (high halfmoves or upcoming repetition)
       bool drawish = position.halfmoves > 50;
       if (!drawish && !root) {
@@ -1953,11 +1868,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
     // Singular Extensions (SE): If a search finds that the TT move is way
     // better than all other moves, extend it under certain conditions.
-    // Skip singular extension if gameCycle (only when Fortress Detection
-    // enabled) BRANCH PREDICTION: Combined check - both conditions are
-    // typically false
+    // Skip when ADD gameCycle (Crystal).
     if (!root && ply < thread_info.current_iter * 2 &&
-        !(fortressDetectionEnabled && gameCycle)) {
+        !(addActive && gameCycle)) {
       if (!singular_search && depth >= SEDepth && move == tt_move &&
           abs(tt_score) < ScoreWin && tt_depth >= depth - 3 &&
           entry_type != EntryTypes::UBound) {
@@ -2005,19 +1918,11 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     // If that beats alpha, we search at normal depth with null window
     // If that also beats alpha, we search at normal depth with full window.
 
-    // Original Patricia LMR condition: depth >= LMRMinDepth && moves_played >
-    // is_pv Crystal adds: skip when gameCycle, extra (!is_pv || ply > 1)
-    // condition IMPROVEMENT 2: Also consider opponent's king danger in LMR
-    // allowance
-    bool allowLMR;
-    if (fortressDetectionEnabled) {
-      bool skipLMRForGameCycle = gameCycle;
-      // Skip LMR if opponent's king is in danger (unless at high ply)
-      allowLMR = depth >= LMRMinDepth && !skipLMRForGameCycle &&
+    // Original Patricia LMR; ADD/Crystal restricts LMR under gameCycle / king danger
+    bool allowLMR = depth >= LMRMinDepth;
+    if (addActive) {
+      allowLMR = depth >= LMRMinDepth && !gameCycle &&
                  (!kingDangerThem || ply > 6) && (!is_pv || ply > 1);
-    } else {
-      // Original Patricia: just depth check
-      allowLMR = depth >= LMRMinDepth;
     }
 
     if (allowLMR && moves_played > is_pv) {
@@ -2047,16 +1952,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
       R = std::clamp(R, 0, newdepth - 1);
 
-      // LMR depth formula: Crystal uses updated formula only when Fortress
-      // Detection enabled
-      int lmr_depth;
-      if (fortressDetectionEnabled) {
-        // Crystal commit 678d5: Updated LMR depth formula
-        lmr_depth = std::max(1, std::min(newdepth - R, newdepth + 2)) + is_pv;
-      } else {
-        // Original Patricia LMR depth
-        lmr_depth = newdepth - R;
-      }
+      int lmr_depth = newdepth - R;
 
       // Reduced search, reduced window
       score = -search<false>(-alpha - 1, -alpha, lmr_depth, true,
@@ -2186,14 +2082,9 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       mcts_sample(thread_info, ply, mate);
       return mate; // Checkmate
     }
-    // Stalemate - apply Armageddon penalty if enabled (FIX 2)
-    if (armageddonMode) {
-      int drawValue = get_draw_value_armageddon(ply, false, thread_info.phase);
-      mcts_sample(thread_info, ply, drawValue);
-      return drawValue;
-    }
-    mcts_sample(thread_info, ply, 0);
-    return 0; // Normal stalemate = draw
+    int drawValue = current_draw_score(position, thread_info, ply);
+    mcts_sample(thread_info, ply, drawValue);
+    return drawValue;
   }
 
   if (best_score >= beta) {
@@ -2410,6 +2301,85 @@ void print_pv(Position &position, ThreadInfo &thread_info) {
   printf("\n");
 }
 
+// ADD BlackHole: per-thread root toggle + TestPassivePlay.
+// Activation (Patricia target behavior):
+//   - near positional 0 (catch 0.00 / equal fortresses even under Armageddon)
+//   - OR near current_draw_score (already scored as draw / Armageddon draw)
+//   - sticky while aspiration window still covers 0 or scored-draw
+// Scoring of drawish branches remains current_draw_score (Armageddon-aware).
+inline void add_prepare_root_depth(Position &position, ThreadInfo &thread_info,
+                                   int depth, int alpha, int beta) {
+  if (!add_detection_active(thread_info))
+    return;
+
+  const int npm = DrawDetect::npm_color(position, Colors::White) +
+                  DrawDetect::npm_color(position, Colors::Black);
+  const int prevScore =
+      thread_info.addBhBestValues[std::max(0, depth - 1)];
+  const int scoreDepth2 =
+      thread_info.addBhBestValues[std::max(0, depth - 2)];
+  const int scoredDraw = current_draw_score(position, thread_info, 0);
+
+  if (npm <= DrawDetect::PassivePlayMaterialBorder) {
+    if (thread_info.addTestPassivePlay != 0) {
+      if ((thread_info.addTestPassivePlay > 0 &&
+           prevScore > thread_info.addTestPassivePlay) ||
+          (thread_info.addTestPassivePlay < 0 &&
+           prevScore < thread_info.addTestPassivePlay))
+        thread_info.addTestPassivePlay = 0;
+    }
+
+    if (!thread_info.addTestPassivePlay && !thread_info.addBlackHole &&
+        depth <= 40 && depth >= 26 &&
+        thread_info.addBhBestValues[std::max(0, depth - 3)] >= prevScore &&
+        (prevScore >= 2 * MaterialValues[PieceTypes::Pawn] ||
+         prevScore <= -300))
+      thread_info.addTestPassivePlay = prevScore;
+
+    if (std::abs(prevScore) >= ScoreWin / 2)
+      thread_info.addTestPassivePlay = 0;
+
+    if (thread_info.addTestPassivePlay != 0)
+      thread_info.addStrongerSide =
+          thread_info.addTestPassivePlay > 0 ? position.color
+                                             : (position.color ^ 1);
+  }
+
+  const bool nearPositionalDraw =
+      std::abs(prevScore) < DrawDetect::BhDrawBand;
+  const bool nearScoredDraw =
+      std::abs(prevScore - scoredDraw) < DrawDetect::BhDrawBand;
+  const bool sticky =
+      thread_info.addBlackHole &&
+      ((alpha <= 0 && beta >= 0) ||
+       (alpha <= scoredDraw && beta >= scoredDraw));
+
+  thread_info.addBlackHole =
+      (!thread_info.addTestPassivePlay || std::abs(scoreDepth2) < 16) &&
+      (nearPositionalDraw || nearScoredDraw || sticky);
+
+  if (thread_info.addBlackHole && !thread_info.addTestPassivePlay &&
+      depth >= MaxSearchDepth / 2)
+    thread_info.searches = (thread_info.searches + 1) % MaxAge;
+
+  // Stronger side from positional sign (0-centered), so Armageddon penalty
+  // magnitude does not invert fortress side detection.
+  if (thread_info.addBlackHole && thread_info.addTestPassivePlay == 0 &&
+      prevScore != 0)
+    thread_info.addStrongerSide =
+        prevScore > 0 ? position.color : (position.color ^ 1);
+}
+
+inline void add_finish_root_depth(ThreadInfo &thread_info, Move currentBest) {
+  if (!add_detection_active(thread_info))
+    return;
+  if (thread_info.addBlackHole && currentBest != MoveNone &&
+      currentBest != thread_info.addBhLastBest)
+    thread_info.searches = (thread_info.searches + 1) % MaxAge;
+  if (currentBest != MoveNone)
+    thread_info.addBhLastBest = currentBest;
+}
+
 void iterative_deepen(
     Position &position, ThreadInfo &thread_info,
     std::vector<TTBucket> &TT) { // Performs an iterative deepening search.
@@ -2417,6 +2387,18 @@ void iterative_deepen(
   thread_info.original_opt = thread_info.opt_time;
   thread_info.datagen_stop = false;
   thread_info.bestMoveChanges = 0;
+
+  // Every thread resets its own ADD/BH state (SMP-safe, identical algorithm).
+  if (add_detection_active(thread_info)) {
+    thread_info.addBlackHole = false;
+    thread_info.addTestPassivePlay = 0;
+    thread_info.addStrongerSide = position.color;
+    thread_info.addBhBestValues.fill(0);
+    thread_info.addBhLastBest = MoveNone;
+  } else {
+    thread_info.addBlackHole = false;
+    thread_info.addTestPassivePlay = 0;
+  }
   thread_info.phase = total_mat(position, thread_info) < PhaseBound
                           ? PhaseTypes::Endgame
                           : PhaseTypes::Sacrifice;
@@ -2621,6 +2603,10 @@ void iterative_deepen(
         beta = -ScoreNone;
       }
 
+      if (add_detection_active(thread_info) &&
+          thread_info.multipv_index == 0)
+        add_prepare_root_depth(position, thread_info, depth, alpha, beta);
+
       thread_info.seldepth = 0;
 
       int score =
@@ -2688,10 +2674,16 @@ void iterative_deepen(
         }
 
         if (score <= alpha || mctsFailLow) {
+          // ADD BlackHole: pin toward positional 0 (detect equal/fortress zone).
+          // Branch scoring still uses current_draw_score (Armageddon-aware).
+          if (thread_info.addBlackHole && add_detection_active(thread_info))
+            beta = 1;
           beta = (alpha + beta) / 2;
           alpha -= delta;
           temp_depth = std::max(1, depth - searchAgainReduction);
         } else if (score >= beta) {
+          if (thread_info.addBlackHole && add_detection_active(thread_info))
+            alpha = -1;
           beta += delta;
           temp_depth = std::max(temp_depth - 1, 1);
         }
@@ -2699,6 +2691,16 @@ void iterative_deepen(
 
         score = search<true>(alpha, beta, temp_depth, false, position,
                              thread_info, TT);
+      }
+
+      if (add_detection_active(thread_info) &&
+          thread_info.multipv_index == 0) {
+        thread_info.addBhBestValues[depth] = score;
+        Move best = thread_info.root_moves.empty() ||
+                            thread_info.root_moves[0].pv.empty()
+                        ? MoveNone
+                        : thread_info.root_moves[0].pv[0];
+        add_finish_root_depth(thread_info, best);
       }
 
       // Sort PV lines searched so far by score (like HypnoS line 846)

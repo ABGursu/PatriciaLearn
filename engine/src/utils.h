@@ -92,7 +92,14 @@ struct alignas(64) ThreadInfo {
   // Armageddon MCTS per-thread sample counters (Cardanobile/Joergoster)
   int64_t mctsVisits = 0;
   int64_t mctsAllScores = 0;
-  
+
+  // Armageddon Draw Detection / BlackHole — per-thread (all threads run the same logic)
+  bool addBlackHole = false;
+  int addTestPassivePlay = 0;
+  int addStrongerSide = 0;
+  std::array<int, MaxSearchDepth + 2> addBhBestValues{};
+  Move addBhLastBest = MoveNone;
+
   // ============================================================================
   // MATERIAL CACHE: Performance optimization for material calculations
   // ============================================================================
@@ -185,6 +192,11 @@ void new_game(ThreadInfo &thread_info, std::vector<TTBucket> &TT) {
   thread_info.seeCache.clear();
   thread_info.mctsVisits = 0;
   thread_info.mctsAllScores = 0;
+  thread_info.addBlackHole = false;
+  thread_info.addTestPassivePlay = 0;
+  thread_info.addStrongerSide = 0;
+  thread_info.addBhBestValues.fill(0);
+  thread_info.addBhLastBest = MoveNone;
 }
 
 uint16_t get_hash_low_bits(uint64_t hash) {

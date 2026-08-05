@@ -2,14 +2,12 @@
 $env:Path += ";C:\msys64\mingw64\bin"
 
 $scenarios = @(
-    @{Name="Default"; Scenario="default"; Desc="Armageddon=OFF, MCTS=OFF, Fortress=OFF"},
-    @{Name="Armageddon Only"; Scenario="armageddon_only"; Desc="Armageddon=ON, MCTS=OFF, Fortress=OFF"},
-    @{Name="Armageddon MCTS"; Scenario="armageddon_mcts"; Desc="Armageddon=OFF, MCTS=ON, Fortress=OFF"},
-    @{Name="Fortress Only"; Scenario="fortress_only"; Desc="Armageddon=OFF, MCTS=OFF, Fortress=ON"},
-    @{Name="MCTS + Fortress"; Scenario="mcts_fortress"; Desc="Armageddon=OFF, MCTS=ON, Fortress=ON"},
-    @{Name="Armageddon + Fortress"; Scenario="armageddon_fortress"; Desc="Armageddon=ON, MCTS=OFF, Fortress=ON"},
-    @{Name="Armageddon + MCTS + Fortress"; Scenario="armageddon_mcts_fortress"; Desc="Armageddon=ON, MCTS=ON, Fortress=ON"},
-    @{Name="MCTS + Experience"; Scenario="mcts_experience"; Desc="MCTS=ON, Experience=ON, Book=OFF"}
+    @{Name="Default"; Scenario="default"; Desc="Armageddon=OFF, MCTS=OFF, ADD=OFF"},
+    @{Name="Armageddon Only"; Scenario="armageddon_only"; Desc="Armageddon=ON, MCTS=OFF, ADD=OFF"},
+    @{Name="Armageddon MCTS"; Scenario="armageddon_mcts"; Desc="Armageddon=OFF, MCTS=ON, ADD=OFF"},
+    @{Name="MCTS + Experience"; Scenario="mcts_experience"; Desc="MCTS=ON, Experience=ON, Book=OFF"},
+    @{Name="ADD Only"; Scenario="add_only"; Desc="Armageddon=OFF, ADD=ON"},
+    @{Name="Armageddon + ADD"; Scenario="armageddon_add"; Desc="Armageddon=ON, ADD=ON"}
 )
 
 $results = @()

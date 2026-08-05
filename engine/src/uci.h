@@ -169,7 +169,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
   // Debug logging is disabled by default (controlled by UCI option)
   // Debug::init() will be called when user enables "Debug Logging" option
 
-  printf("Patricia Chess Engine 5.4, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
+  printf("Patricia Chess Engine 5.6, written by Adam Kulju, edited by A. B. Gursu\n\n\n");
 
   // Initialize Learning system (load experience file)
   Learning::init();
@@ -201,8 +201,6 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     if (command == "quit") {
       // CRITICAL FIX: Stop all searches first, then terminate threads
-      // This prevents threads from getting stuck in deep search when Fortress
-      // Detection is enabled
       thread_data.stop = true;
       thread_data.terminate = true;
 
@@ -244,7 +242,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
     else if (command == "uci") {
       printf(
-          "id name Patricia 5.5\n"
+          "id name Patricia 5.6\n"
           "id author Adam Kulju, A.B. Gursu\n"
           "option name Hash type spin default 32 min 1 max 131072\n"
           "option name Threads type spin default 1 min 1 max 1024\n"
@@ -266,10 +264,10 @@ void uci(ThreadInfo &thread_info, Position &position) {
           "option name Ponder type check default false\n"
           "option name Move Overhead type spin default 10 min 0 max 5000\n"
           "option name Minimum Thinking Time type spin default 1 min 0 max 5000\n"
-          "option name Fortress Detection type check default false\n"
           "option name Armageddon type check default false\n"
           "option name Armageddon MCTS type check default false\n"
           "option name Armageddon TB Penalty type check default false\n"
+          "option name Armageddon Draw Detection type check default false\n"
           "option name Debug Logging type check default false\n");
 
       /*for (auto &param : params) {
@@ -435,21 +433,10 @@ void uci(ThreadInfo &thread_info, Position &position) {
       }
 
       // ========================================================================
-      // FORTRESS DETECTION & ARMAGEDDON MODE (Crystal port)
+      // ARMAGEDDON MODE
       // ========================================================================
       // Support both exact match and case-insensitive match for ChessBase
       // compatibility
-      else if (name == "Fortress Detection" ||
-               case_insensitive_compare(name, "Fortress Detection")) {
-        std::string value;
-        input_stream >> value;
-        bool enabled = (value == "true");
-        set_fortress_detection(enabled);
-        printf("info string Fortress Detection is now: %s\n",
-               enabled ? "enabled" : "disabled");
-        continue;
-      }
-
       else if (name == "Armageddon" ||
                case_insensitive_compare(name, "Armageddon")) {
         // Just "Armageddon" - the "value" keyword was already consumed
@@ -486,6 +473,17 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
+      else if (name == "Armageddon Draw Detection" ||
+               case_insensitive_compare(name, "Armageddon Draw Detection")) {
+        std::string val;
+        input_stream >> val; // true/false
+        bool enabled = (val == "true");
+        set_armageddon_draw_detection(enabled);
+        printf("info string Armageddon Draw Detection is now: %s\n",
+               enabled ? "enabled" : "disabled");
+        continue;
+      }
+
       else if (name == "Debug Logging" ||
                case_insensitive_compare(name, "Debug Logging")) {
         // The multi-word name was already parsed, "value" was already consumed
@@ -513,7 +511,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
 
         // CRITICAL FIX: Stop all searches first, then terminate threads
         // This prevents threads from getting stuck in deep search when modes
-        // like Fortress Detection or Armageddon are enabled
+        // like Armageddon are enabled
         thread_data.stop = true;
         thread_data.terminate = true;
 
@@ -561,8 +559,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
         }
 
         // CRITICAL FIX: Reset stop flag so future searches can start
-        // This is especially important when Fortress Detection or Armageddon
-        // modes are enabled
+        // This is especially important when Armageddon modes are enabled
         thread_data.stop = false;
       }
 
