@@ -292,12 +292,13 @@ void insert_entry(
 }
 
 void calculate(Position &position) { // Calculates the zobrist key of
-                                               // a given position.
+                                     // a given position.
   // Useful when initializing positions, in search though
   // incremental updates are faster.
   uint64_t hash = 0;
   uint64_t pawn_hash = 0;
-  position.non_pawn_key[Colors::White] = 0, position.non_pawn_key[Colors::Black] = 0;
+  position.non_pawn_key[Colors::White] = 0,
+  position.non_pawn_key[Colors::Black] = 0;
 
   for (int indx = 0; indx < 64; indx++) {
     int piece = position.board[indx];
@@ -306,7 +307,8 @@ void calculate(Position &position) { // Calculates the zobrist key of
       if (get_piece_type(piece) == PieceTypes::Pawn) {
         pawn_hash ^= zobrist_keys[get_zobrist_key(piece, indx)];
       } else {
-        position.non_pawn_key[get_color(piece)] ^= zobrist_keys[get_zobrist_key(piece, indx)];
+        position.non_pawn_key[get_color(piece)] ^=
+            zobrist_keys[get_zobrist_key(piece, indx)];
       }
     }
   }

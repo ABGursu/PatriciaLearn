@@ -476,8 +476,9 @@ inline bool is_cap(const Position &position, const Move &move) {
           is_queen_promo((move)));
 }
 
-inline void update_nnue_state(ThreadInfo &thread_info, Move move,
-                       const Position &position, const Position &moved_position) { // Updates the nnue state
+void update_nnue_state(
+    ThreadInfo &thread_info, Move move, const Position &position,
+    const Position &moved_position) { // Updates the nnue state
 
   int from = extract_from(move), to = extract_to(move);
   int from_piece = position.board[from];
@@ -777,8 +778,7 @@ inline bool is_pseudo_legal(const Position &position, Move move, uint64_t checke
 
   if (type == MoveTypes::Castling) {
     std::array<Move, ListSize> pseudo_list;
-    int pseudo_nmoves =
-        movegen(position, pseudo_list, checkers, 0);
+    int pseudo_nmoves = movegen(position, pseudo_list, checkers, 0);
 
     int legal_nmoves = 0;
     for (int i = 0; i < pseudo_nmoves; i++) {

@@ -116,8 +116,8 @@ MultiArray<uint64_t, 2, 64> PawnAttacks;
 std::array<uint64_t, 64> KingAttacks;
 std::array<uint64_t, 64> KnightAttacks;
 
-inline uint64_t attack_index(uint64_t occupancy, uint64_t mask,
-                             uint64_t magic, int shift) {
+inline uint64_t attack_index(uint64_t occupancy, uint64_t mask, uint64_t magic,
+                             int shift) {
 #if defined(PATRICIA_USE_PEXT)
   (void)magic;
   (void)shift;
@@ -376,23 +376,20 @@ void fill_pawn_attacks() {
 
 inline uint64_t get_bishop_attacks(int sq, uint64_t occ) {
 #if defined(PATRICIA_USE_PEXT)
-  return BishopAttackPtrs[sq][attack_index(occ,
-                                           BishopMasks[sq], BishopMagics[sq],
-                                           55)];
+  return BishopAttackPtrs[sq][attack_index(occ, BishopMasks[sq],
+                                           BishopMagics[sq], 55)];
 #else
-  return BishopAttacks[sq][attack_index(occ,
-                                        BishopMasks[sq], BishopMagics[sq],
+  return BishopAttacks[sq][attack_index(occ, BishopMasks[sq], BishopMagics[sq],
                                         55)];
 #endif
 }
 
 inline uint64_t get_rook_attacks(int sq, uint64_t occ) {
 #if defined(PATRICIA_USE_PEXT)
-  return RookAttackPtrs[sq][attack_index(occ, RookMasks[sq],
-                                         RookMagics[sq], 52)];
+  return RookAttackPtrs[sq]
+                       [attack_index(occ, RookMasks[sq], RookMagics[sq], 52)];
 #else
-  return RookAttacks[sq][attack_index(occ, RookMasks[sq],
-                                      RookMagics[sq], 52)];
+  return RookAttacks[sq][attack_index(occ, RookMasks[sq], RookMagics[sq], 52)];
 #endif
 }
 

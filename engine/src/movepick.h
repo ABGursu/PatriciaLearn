@@ -52,10 +52,8 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
   }
 
   if (picker.stage == Stages::GenCaptures) {
-    picker.captures.len =
-        movegen_dispatch<Generate::GenCaptures>(position,
-                                                picker.captures.moves.data(),
-                                                picker.checkers);
+    picker.captures.len = movegen_dispatch<Generate::GenCaptures>(
+        position, picker.captures.moves.data(), picker.checkers);
 
     for (int i = 0; i < picker.captures.len; ++i) {
       Move move = picker.captures.moves[i];
@@ -74,15 +72,12 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
 
       if (extract_promo(move) == Promos::Queen) {
         picker.captures.scores[i] =
-            QueenPromoScore +
-            victim_value * MovePickerTuning::VictimScale -
-            attacker_value +
-            capture_history;
+            QueenPromoScore + victim_value * MovePickerTuning::VictimScale -
+            attacker_value + capture_history;
       } else {
         picker.captures.scores[i] =
             GoodCaptureBaseScore +
-            victim_value * MovePickerTuning::VictimScale -
-            attacker_value +
+            victim_value * MovePickerTuning::VictimScale - attacker_value +
             capture_history;
       }
     }
@@ -92,10 +87,9 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
 
   if (picker.stage == Stages::Captures) {
     while (picker.idx < picker.captures.len) {
-      Move move =
-          get_next_move(picker.captures.moves.data(),
-                        picker.captures.scores.data(), picker.idx++,
-                        picker.captures.len);
+      Move move = get_next_move(picker.captures.moves.data(),
+                                picker.captures.scores.data(), picker.idx++,
+                                picker.captures.len);
 
       if (move == tt_move) {
         continue;
@@ -103,18 +97,14 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
 
       int from_piece = position.board[extract_from(move)];
       int to = extract_to(move);
-      int see_adjustment =
-          thread_info.CapHistScores[from_piece][to] /
-          MovePickerTuning::CaptureHistorySeeDivisor;
+      int see_adjustment = thread_info.CapHistScores[from_piece][to] /
+                           MovePickerTuning::CaptureHistorySeeDivisor;
 
-      if (see_adjustment >
-          MovePickerTuning::MaxCaptureHistorySeeAdjustment) {
-        see_adjustment =
-            MovePickerTuning::MaxCaptureHistorySeeAdjustment;
+      if (see_adjustment > MovePickerTuning::MaxCaptureHistorySeeAdjustment) {
+        see_adjustment = MovePickerTuning::MaxCaptureHistorySeeAdjustment;
       } else if (see_adjustment <
                  -MovePickerTuning::MaxCaptureHistorySeeAdjustment) {
-        see_adjustment =
-            -MovePickerTuning::MaxCaptureHistorySeeAdjustment;
+        see_adjustment = -MovePickerTuning::MaxCaptureHistorySeeAdjustment;
       }
 
       if (SEE(position, move, picker.see_threshold - see_adjustment)) {
@@ -129,10 +119,8 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
   }
 
   if (picker.stage == Stages::GenQuiets) {
-    picker.quiets.len =
-        movegen_dispatch<Generate::GenQuiets>(position,
-                                              picker.quiets.moves.data(),
-                                              picker.checkers);
+    picker.quiets.len = movegen_dispatch<Generate::GenQuiets>(
+        position, picker.quiets.moves.data(), picker.checkers);
 
     Move opponent_previous_move = (picker.ss - 1)->played_move;
     Move own_previous_move = (picker.ss - 2)->played_move;
@@ -168,11 +156,9 @@ Move next_move(MovePicker &picker, Position &position, ThreadInfo &thread_info,
       int score = thread_info.HistoryScores[piece][to];
 
       if (has_opponent_previous_move) {
-        score +=
-            MovePickerTuning::ImmediateContinuationWeight *
-            thread_info
-                .ContHistScores[opponent_previous_piece][opponent_previous_to]
-                               [piece][to];
+        score += MovePickerTuning::ImmediateContinuationWeight *
+                 thread_info.ContHistScores[opponent_previous_piece]
+                                           [opponent_previous_to][piece][to];
       }
 
       if (has_own_previous_move) {
