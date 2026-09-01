@@ -76,7 +76,7 @@ namespace PhaseTypes {
 constexpr uint8_t Middlegame = 0;
 constexpr uint8_t Endgame = 1;
 constexpr uint8_t Sacrifice = 2;
-} // namespace NetTypes
+} // namespace PhaseTypes
 
 constexpr int get_piece_type(int x) { return x / 2; }
 
@@ -158,7 +158,7 @@ constexpr int MaxAge = 1 << 6;
 
 struct TTEntry {
   uint16_t position_key; // The lower 16 bits of the hash key are stored
-  int16_t static_eval;
+  int16_t static_eval; // static eval saved of the position
   int16_t score;     // Score of the position
   Move best_move;    // Best move in the position
   uint8_t depth;     // Depth that the entry was searched to

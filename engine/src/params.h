@@ -30,7 +30,7 @@ inline std::vector<Parameter>& parameter_registry() {
   }();
   return registry;
 }
-}
+} // namespace tune_detail
 
 inline std::vector<Parameter>& get_params() {
   return tune_detail::parameter_registry();

@@ -7,14 +7,14 @@ constexpr uint8_t Captures = 2;
 constexpr uint8_t GenQuiets = 3;
 constexpr uint8_t Quiets = 4;
 constexpr uint8_t BadCaptures = 5;
-}
+} // namespace Stages
 
 namespace MovePickerTuning {
 constexpr int VictimScale = 100;
 constexpr int CaptureHistorySeeDivisor = 128;
 constexpr int MaxCaptureHistorySeeAdjustment = 128;
 constexpr int ImmediateContinuationWeight = 2;
-}
+} // namespace MovePickerTuning
 
 struct MovePicker {
   int see_threshold;

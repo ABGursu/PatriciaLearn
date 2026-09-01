@@ -1597,6 +1597,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
     }
   }
 
+  // Razoring: if our position is really bad compared to alpha and we're at low depths, we can probably return if qsearch fails as well.
   if (!is_pv && !in_check && !singular_search) {
 
     const bool skipForGameCycle = addActive && gameCycle;
@@ -1658,6 +1659,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   }
 
   int p_beta = beta + ProbcutMargin;
+  // Probcut: if a low depth search of only captures beats beta by a significant margin, we're good to return early.
 
   if (cutnode && !(addActive && gameCycle) && abs(beta) < ScoreWin &&
       depth > 4 &&
@@ -1711,7 +1713,6 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       }
     }
   }
-
   Move quiets[64];
   int num_quiets = 0;
   Move captures[64];
@@ -1726,6 +1727,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   bool is_capture = false, skip = false;
 
   while (Move move = next_move(picker, position, thread_info, tt_move, skip)) {
+    // skip various excluded moves
 
     if (root) {
       if (!std::count(thread_info.root_moves.begin() +
@@ -1789,6 +1791,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         skip = true;
       }
 
+      // History Pruning: at low depths, we can prune quiets with very bad history (failed low many times)
       if (!is_pv && !is_capture && lmr_depth < HistPruningDepth &&
           hist_score < -4096 * lmr_depth) {
         skip = true;
@@ -1935,19 +1938,23 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
         R -= hist_score / HistDiv;
       }
 
-      // Increase reduction if not in pv
+      // Decrease reduction if in pv
       R -= is_pv;
 
+      // Decrease reduction if we have searched this position at a higher depth before
       R -= (tt_hit && tt_depth >= depth);
 
       // Increase reduction if not improving
       R += !improving;
 
+      // Increase reduction in an expected cutnode
       R += cutnode;
 
+      // Decrease reduction for checks
       R -= (attacks_square(moved_position, get_king_pos(position, color ^ 1),
                            color) != 0);
 
+      // Increase reduction if opponent has had many refutations so far
       R += (thread_info.FailHighCount[ply + 1] > 4);
 
       R = std::clamp(R, 0, newdepth - 1);
@@ -2173,6 +2180,8 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
 
   bool best_capture = is_cap(position, best_move);
 
+  // update various correction histories
+  
   if (!in_check && (!best_move || !best_capture) &&
       !(best_score >= beta && best_score <= ss->static_eval) &&
       !(!best_move && best_score >= ss->static_eval)) {
@@ -2399,9 +2408,8 @@ void iterative_deepen(
     thread_info.addBlackHole = false;
     thread_info.addTestPassivePlay = 0;
   }
-  thread_info.phase = total_mat(position, thread_info) < PhaseBound
-                          ? PhaseTypes::Endgame
-                          : PhaseTypes::Sacrifice;
+  thread_info.phase = total_mat(position, thread_info) < PhaseBound ? PhaseTypes::Endgame
+                                                       : PhaseTypes::Sacrifice;
   thread_info.nnue_state.reset_nnue(position, thread_info.phase);
   calculate(position);
   thread_info.nodes = 0;

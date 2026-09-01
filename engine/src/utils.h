@@ -303,10 +303,9 @@ void calculate(Position &position) { // Calculates the zobrist key of
     int piece = position.board[indx];
     if (piece) {
       hash ^= zobrist_keys[get_zobrist_key(piece, indx)];
-      if (get_piece_type(piece) == PieceTypes::Pawn){
+      if (get_piece_type(piece) == PieceTypes::Pawn) {
         pawn_hash ^= zobrist_keys[get_zobrist_key(piece, indx)];
-      }
-      else{
+      } else {
         position.non_pawn_key[get_color(piece)] ^= zobrist_keys[get_zobrist_key(piece, indx)];
       }
     }
@@ -326,9 +325,7 @@ void calculate(Position &position) { // Calculates the zobrist key of
   position.pawn_key = pawn_hash;
 }
 
-int get_corrhist_index(uint64_t key){
-  return key % 16384;
-}
+int get_corrhist_index(uint64_t key) { return key % 16384; }
 
 int64_t time_elapsed(std::chrono::steady_clock::time_point start_time) {
   // get the time that has elapsed since the start of search

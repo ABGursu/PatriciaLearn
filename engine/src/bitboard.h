@@ -10,6 +10,9 @@
 #include <immintrin.h>
 #endif
 
+// I'm gonna be completely honest a lot of this code has been completely rewritten by other users so
+// I don't feel comfortable commenting it without a deeper look. It passed the tests and that's what I care about.
+
 enum Square : int { // a1 = 0. a8 = 7, etc. thus a1 is the LSB and h8 is the
                     // MSB.
   a1,
