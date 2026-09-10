@@ -12,6 +12,7 @@ constexpr std::array<int, 20> skill_levels = {
     1900, 2000, 2100, 2200, 2300, 2400, 2500, 2650, 2800, 3000};
 
 void run_thread(Position &position, ThreadInfo &thread_info, std::thread &s) {
+  Learning::wait_for_loading_finished();
 
   // This wrapper function allows the user to call the "stop" command to stop
   // the search immediately.
@@ -360,7 +361,9 @@ void uci(ThreadInfo &thread_info, Position &position) {
                case_insensitive_compare(name, "Experience Enabled")) {
         std::string value;
         input_stream >> value;
-        bool enabled = (value == "true");
+        bool enabled = (value == "true" ||
+                        case_insensitive_compare(value, "true") ||
+                        value == "1");
         Learning::set_experience_enabled(enabled);
         printf("info string Experience Enabled is now: %s\n",
                enabled ? "enabled" : "disabled");
@@ -376,27 +379,34 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Readonly") {
+      else if (name == "Experience Readonly" ||
+               case_insensitive_compare(name, "Experience Readonly")) {
         std::string value;
         input_stream >> value;
-        bool readonly = (value == "true");
+        bool readonly = (value == "true" ||
+                         case_insensitive_compare(value, "true") ||
+                         value == "1");
         Learning::set_experience_readonly(readonly);
         printf("info string Experience Readonly is now: %s\n",
                readonly ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Experience Book") {
+      else if (name == "Experience Book" ||
+               case_insensitive_compare(name, "Experience Book")) {
         std::string value;
         input_stream >> value;
-        bool enabled = (value == "true");
+        bool enabled = (value == "true" ||
+                        case_insensitive_compare(value, "true") ||
+                        value == "1");
         Learning::set_experience_book_enabled(enabled);
         printf("info string Experience Book is now: %s\n",
                enabled ? "enabled" : "disabled");
         continue;
       }
 
-      else if (name == "Experience Book Width") {
+      else if (name == "Experience Book Width" ||
+               case_insensitive_compare(name, "Experience Book Width")) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_width(value);
@@ -405,7 +415,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Book Eval Importance") {
+      else if (name == "Experience Book Eval Importance" ||
+               case_insensitive_compare(name, "Experience Book Eval Importance")) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_eval_importance(value);
@@ -414,7 +425,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Book Min Depth") {
+      else if (name == "Experience Book Min Depth" ||
+               case_insensitive_compare(name, "Experience Book Min Depth")) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_min_depth(value);
@@ -423,7 +435,8 @@ void uci(ThreadInfo &thread_info, Position &position) {
         continue;
       }
 
-      else if (name == "Experience Book Max Moves") {
+      else if (name == "Experience Book Max Moves" ||
+               case_insensitive_compare(name, "Experience Book Max Moves")) {
         int value;
         input_stream >> value;
         Learning::set_experience_book_max_moves(value);
@@ -682,6 +695,7 @@ void uci(ThreadInfo &thread_info, Position &position) {
     }
 
     else if (command == "go") {
+      Learning::wait_for_loading_finished();
       thread_info.start_time = std::chrono::steady_clock::now();
 
       for (int i = 0; i < thread_data.thread_infos.size(); i++) {

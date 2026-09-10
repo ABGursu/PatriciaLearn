@@ -223,20 +223,25 @@ inline bool drawish_branch(const Position &pos, ThreadInfo &ti, int ply,
       (!blackHole || testPassiveNonZero))
     return true;
 
-  // BlackHole active: fortress / wall / passive signals (detection → draw score)
+  // Fortress and locked wall detection (applicable whenever ADD is active,
+  // in endgames / fortress zones, both around 0.00 and in winning positions)
+  if (possible_fortress(pos, strongerSide) ||
+      possible_fortress(pos, strongerSide ^ 1) ||
+      possible_wall(pos) >= 6)
+    return true;
+
+  // BlackHole active (0.00 zone): detect general passive play
   if (blackHole) {
-    if (possible_fortress(pos, strongerSide) ||
-        possible_fortress(pos, strongerSide ^ 1) || possible_wall(pos) >= 6)
-      return true;
     return passive_play(pos, ti, ply, strongerSide);
   }
 
-  // TestPassivePlay path (stuck "winning" claim)
-  if (!testPassiveNonZero)
-    return false;
-  if (!passive_play_ext(pos, ply, strongerSide, true))
-    return false;
-  return passive_play(pos, ti, ply, strongerSide);
+  // TestPassivePlay path (stuck "winning" claim): detect extended passive play
+  if (testPassiveNonZero) {
+    if (passive_play_ext(pos, ply, strongerSide, true))
+      return passive_play(pos, ti, ply, strongerSide);
+  }
+
+  return false;
 }
 
 } // namespace DrawDetect

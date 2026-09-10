@@ -135,6 +135,53 @@ struct alignas(64) ThreadInfo {
       valid = false;
     }
   } seeCache;
+
+  ThreadInfo() = default;
+  ThreadInfo(const ThreadInfo &) = delete;
+  ThreadInfo &operator=(const ThreadInfo &) = delete;
+  ThreadInfo(ThreadInfo &&) = default;
+  ThreadInfo &operator=(ThreadInfo &&) = default;
+
+  void copy_from(const ThreadInfo &other) {
+    thread_id = other.thread_id;
+    game_hist = other.game_hist;
+    game_ply = other.game_ply;
+    search_ply = other.search_ply;
+    tb_hits = other.tb_hits;
+    nodes = other.nodes;
+    root_moves = other.root_moves;
+    start_time = other.start_time;
+    seldepth = other.seldepth;
+    max_time = other.max_time;
+    opt_time = other.opt_time;
+    original_opt = other.original_opt;
+    time_checks = other.time_checks;
+    nnue_state = other.nnue_state;
+    HistoryScores = other.HistoryScores;
+    ContHistScores = other.ContHistScores;
+    CapHistScores = other.CapHistScores;
+    PawnCorrHist = other.PawnCorrHist;
+    NonPawnCorrHist = other.NonPawnCorrHist;
+    ContCorrHist = other.ContCorrHist;
+    KillerMoves = other.KillerMoves;
+    FailHighCount = other.FailHighCount;
+    multipv = other.multipv;
+    multipv_index = other.multipv_index;
+    max_nodes_searched = other.max_nodes_searched;
+    max_iter_depth = other.max_iter_depth;
+    mate_limit = other.mate_limit;
+    best_moves = other.best_moves;
+    best_scores = other.best_scores;
+    pv = other.pv;
+    position = other.position;
+    searches = other.searches;
+    bestPreviousScore = other.bestPreviousScore;
+    bestPreviousAverageScore = other.bestPreviousAverageScore;
+    previousTimeReduction = other.previousTimeReduction;
+    originalTimeAdjust = other.originalTimeAdjust;
+    addBhBestValues = other.addBhBestValues;
+    addBhLastBest = other.addBhLastBest;
+  }
 };
 
 RootMoveInfo *find_root_move(ThreadInfo &thread_info, Move move) {

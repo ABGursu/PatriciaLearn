@@ -13,12 +13,18 @@
 
 namespace Learning {
 
-// Custom Hash functor for Zobrist keys (matches HypnoS KeyHasher)
-// Masks to 32-bits for better hash distribution with 64-bit Zobrist keys
+// 64-bit hash mixer for Zobrist keys (splitmix64 bit-finalizer)
+// Provides excellent bucket distribution across all 64 bits of entropy.
+// Note: Only affects in-memory hash map; does NOT alter on-disk .exp binary format.
 struct KeyHasher {
-  // Hash operator - mask to lower 32 bits
   constexpr size_t operator()(const uint64_t &key) const {
-    return static_cast<size_t>(key & 0x00000000FFFFFFFFULL);
+    uint64_t x = key;
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return static_cast<size_t>(x);
   }
 
   // Compare operator
@@ -470,11 +476,9 @@ private:
       size_t allMoves = 0;
       size_t allPositions = 0;
 
-      for (ExpEntryEx *expEx : _newPvExp)
-        link_entry(expEx);
-
-      for (ExpEntryEx *expEx : _newMultiPvExp)
-        link_entry(expEx);
+      // Note: Entries in _newPvExp and _newMultiPvExp are already linked into _mainExp
+      // at creation time (in add_pv_experience and add_multipv_experience).
+      // Calling link_entry again here would cause self-merging and double counts.
 
       for (auto &x : _mainExp) {
         allPositions++;

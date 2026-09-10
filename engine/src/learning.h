@@ -171,6 +171,10 @@ struct ExpEntryEx : ExpEntry {
       const ExpEntryEx *temp1 = this;
       int moveCount = 0;
 
+      // Track visited keys to detect repetitions within the lookahead simulation
+      std::array<uint64_t, QualityExperienceMovesAhead + 1> lookaheadKeys{};
+      lookaheadKeys[0] = pos.zobrist_key;
+
       // Loop like HypnoS: while(true) with break conditions inside
       while (true) {
         // To be used later
@@ -180,12 +184,22 @@ struct ExpEntryEx : ExpEntry {
         uint16_t mv = static_cast<uint16_t>(temp1->move);
         make_move_fn(pos, mv);
         me ^= 1;
-        ++moveCount;
+        lookaheadKeys[++moveCount] = pos.zobrist_key;
 
-        // Draw detection after move (like HypnoS: pos.is_draw(pos.game_ply()))
+        // Draw detection after move (50-move rule, material draw, and base game history)
         if constexpr (!std::is_same_v<IsDrawFunc, std::nullptr_t>) {
           if (!maybeDraw) {
             maybeDraw = is_draw_fn(pos);
+          }
+        }
+
+        // Detect repetitions within lookahead simulation (at least 2 plies back)
+        if (!maybeDraw) {
+          for (int i = moveCount - 2; i >= 0; i -= 2) {
+            if (lookaheadKeys[i] == pos.zobrist_key) {
+              maybeDraw = true;
+              break;
+            }
           }
         }
 

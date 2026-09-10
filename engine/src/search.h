@@ -47,7 +47,7 @@ inline bool get_armageddon_tb_penalty() { return armageddonTbPenalty; }
 inline bool get_armageddon_draw_detection() { return armageddonDrawDetection; }
 
 inline bool add_detection_active(const ThreadInfo &ti) {
-  return armageddonDrawDetection && ti.multipv == 1;
+  return armageddonDrawDetection;
 }
 
 // Sample an alpha-beta return into Armageddon MCTS root statistics.
@@ -852,7 +852,7 @@ material_draw(const Position &position) { // Is there not enough material on the
 
 inline bool
 is_draw(const Position &position,
-        ThreadInfo &thread_info) { // Detects if the position is a draw.
+        const ThreadInfo &thread_info) { // Detects if the position is a draw.
 
   uint64_t hash = position.zobrist_key;
 
@@ -885,118 +885,6 @@ is_draw(const Position &position,
   return false;
 }
 
-// ExpEntryEx::quality - Calculate quality of an experience entry
-// Returns pair: (quality_score, maybe_draw)
-// Port from HypnoS, adapted for Patricia's structures
-inline std::pair<int, bool> exp_quality(const Learning::ExpEntryEx *entry,
-                                        Position &pos, ThreadInfo &thread_info,
-                                        int evalImportance) {
-  static constexpr int QualityEvalImportanceMax = 10;
-  static constexpr int QualityExperienceMovesAhead = 10;
-  static constexpr int COLOR_NB = 2;
-
-  assert(evalImportance >= 0 && evalImportance <= QualityEvalImportanceMax);
-
-  // Draw detection
-  bool maybeDraw = false;
-
-  // Quality based on move count
-  int q = entry->count * (QualityEvalImportanceMax - evalImportance);
-
-  // Quality based on difference in evaluation
-  if (evalImportance) {
-    const uint8_t us = pos.color;
-    const uint8_t them = us ^ 1;
-
-    // Calculate quality based on evaluation improvement of next moves
-    std::vector<Move> moves; // Used for doing/undoing of experience moves
-
-    std::array<int64_t, COLOR_NB> sum{};
-    std::array<int64_t, COLOR_NB> weight{};
-
-    // Start our sum/weight with something positive!
-    sum[us] = entry->count;
-    weight[us] = 1;
-
-    // Save original position and thread_info for restoration
-    Position originalPos = pos;
-    ThreadInfo originalThreadInfo = thread_info;
-
-    // Look ahead
-    uint8_t me = us;
-    const Learning::ExpEntryEx *lastExp[COLOR_NB] = {nullptr, nullptr};
-    const Learning::ExpEntryEx *temp1 = entry;
-
-    while (true) {
-      // To be used later
-      lastExp[me] = temp1;
-
-      // Do the move
-      Move moveToPlay = static_cast<Move>(temp1->move);
-      moves.push_back(moveToPlay);
-      make_move(pos, moveToPlay);
-      thread_info.game_ply++;
-      me = me ^ 1;
-
-      if (!maybeDraw) {
-        maybeDraw = is_draw(pos, thread_info);
-      }
-
-      if (moves.size() >= QualityExperienceMovesAhead) {
-        break;
-      }
-
-      // Probe the new position
-      temp1 = Learning::probe(pos.zobrist_key);
-
-      if (!temp1) {
-        break;
-      }
-
-      // Find best next experience move (shallow search)
-      const Learning::ExpEntryEx *temp2 = temp1->next;
-
-      while (temp2) {
-        if (temp2->compare(temp1) > 0) {
-          temp1 = temp2;
-        }
-        temp2 = temp2->next;
-      }
-
-      if (lastExp[me]) {
-        sum[me] += static_cast<int64_t>(temp1->value - lastExp[me]->value);
-        ++weight[me];
-      }
-    }
-
-    // Restore position and thread_info by undoing all moves
-    pos = originalPos;
-    thread_info = originalThreadInfo;
-
-    // Calculate quality
-    int64_t s = sum[us];
-    int64_t w = weight[us];
-
-    if (weight[them]) {
-      s -= sum[them];
-      w += weight[them];
-    }
-
-    if (w > 0) {
-      q += static_cast<int>(s * evalImportance / w);
-    }
-  } else {
-    // Shallow draw detection when 'evalImportance' is zero!
-    Position tempPos = pos;
-    ThreadInfo tempThreadInfo = thread_info;
-    Move moveToPlay = static_cast<Move>(entry->move);
-    make_move(tempPos, moveToPlay);
-    tempThreadInfo.game_ply++;
-    maybeDraw = is_draw(tempPos, tempThreadInfo);
-  }
-
-  return {q / QualityEvalImportanceMax, maybeDraw};
-}
 
 inline int qsearch(int alpha, int beta, Position &position,
                    ThreadInfo &thread_info,
@@ -1038,7 +926,7 @@ inline int qsearch(int alpha, int beta, Position &position,
   }
 
   // ADD BlackHole: score confirmed drawish shallow branches
-  if (addActive && thread_info.addBlackHole &&
+  if (addActive &&
       DrawDetect::drawish_branch(position, thread_info, ply,
                                  thread_info.addBlackHole,
                                  thread_info.addStrongerSide,
@@ -2373,8 +2261,7 @@ inline void add_prepare_root_depth(Position &position, ThreadInfo &thread_info,
 
   // Stronger side from positional sign (0-centered), so Armageddon penalty
   // magnitude does not invert fortress side detection.
-  if (thread_info.addBlackHole && thread_info.addTestPassivePlay == 0 &&
-      prevScore != 0)
+  if (thread_info.addTestPassivePlay == 0 && prevScore != 0)
     thread_info.addStrongerSide =
         prevScore > 0 ? position.color : (position.color ^ 1);
 }
@@ -2471,12 +2358,7 @@ void iterative_deepen(
                 make_move(pos, static_cast<Move>(mv));
               },
               [&thread_info](const Position &pos) {
-                // Full draw detection: 50-move rule, material draw, AND
-                // repetition (matches HypnoS pos.is_draw())
-                // Note: We need to use a non-const copy for is_draw
-                Position tempPos = pos;
-                ThreadInfo tempThreadInfo = thread_info;
-                return is_draw(tempPos, tempThreadInfo);
+                return is_draw(pos, thread_info);
               });
           if (q > 0 && !maybeDraw) {
             qualityList.emplace_back(temp, q);
@@ -2634,11 +2516,12 @@ void iterative_deepen(
           break;
 
         // Armageddon MCTS: also fail low if visit-averaged score is weak
+        const size_t rmIdx = static_cast<size_t>(thread_info.multipv_index);
         const bool mctsFailLow =
-            armageddonMcts && !thread_info.root_moves.empty() &&
-            thread_info.root_moves[0].visits > 0 &&
-            (thread_info.root_moves[0].zScore /
-             thread_info.root_moves[0].visits) <= (alpha - 50);
+            armageddonMcts && rmIdx < thread_info.root_moves.size() &&
+            thread_info.root_moves[rmIdx].visits > 0 &&
+            (thread_info.root_moves[rmIdx].zScore /
+             thread_info.root_moves[rmIdx].visits) <= (alpha - 50);
 
         if (score > alpha && score < beta && !mctsFailLow)
           break;
@@ -2682,20 +2565,36 @@ void iterative_deepen(
         }
 
         if (score <= alpha || mctsFailLow) {
-          // ADD BlackHole: pin toward positional 0 (detect equal/fortress zone).
-          // Branch scoring still uses current_draw_score (Armageddon-aware).
-          if (thread_info.addBlackHole && add_detection_active(thread_info))
+          // Sting SF BH-11 BlackHole:
+          // In fail-low, if BlackHole is active and window straddles 0 (alpha < 1),
+          // pin beta = 1 directly (repelling 0.00 without halving!).
+          // Otherwise, standard aspiration halving applies: beta = (alpha + beta) / 2.
+          if (score <= alpha && thread_info.addBlackHole &&
+              add_detection_active(thread_info) && alpha < 1) {
             beta = 1;
-          beta = (alpha + beta) / 2;
-          alpha -= delta;
+          } else {
+            beta = (alpha + beta) / 2;
+          }
+          alpha = std::max(alpha - delta, ScoreNone);
           temp_depth = std::max(1, depth - searchAgainReduction);
         } else if (score >= beta) {
-          if (thread_info.addBlackHole && add_detection_active(thread_info))
+          // Sting SF BH-11 BlackHole:
+          // In fail-high, if BlackHole is active and window straddles 0 (beta > -1),
+          // pin alpha = -1 directly (repelling 0.00 floor).
+          if (thread_info.addBlackHole && add_detection_active(thread_info) &&
+              beta > -1) {
             alpha = -1;
-          beta += delta;
+          }
+          beta = std::min(beta + delta, -ScoreNone);
           temp_depth = std::max(temp_depth - 1, 1);
         }
         delta += delta / 3;
+
+        // Proposal 4: Universal Guard against aspiration window inversion
+        if (alpha >= beta) {
+          alpha = ScoreNone;
+          beta = -ScoreNone;
+        }
 
         score = search<true>(alpha, beta, temp_depth, false, position,
                              thread_info, TT);
@@ -2975,18 +2874,18 @@ finish:
       !thread_data.is_frc &&   // Don't save for Chess960 (like HypnoS)
       !thread_info.is_human) { // Don't save for Skill Level mode (like HypnoS
                                // UCI_LimitStrength)
+    // Depth fallback: if GUI requested fixed depth, use that as fallback
+    // (like HypnoS limits.depth fallback)
+    int effDepth = thread_info.current_iter;
+    if (thread_info.max_iter_depth > 0 &&
+        thread_info.max_iter_depth < MaxSearchDepth) {
+      effDepth =
+          std::max(effDepth, static_cast<int>(thread_info.max_iter_depth));
+    }
+
     // Save PV experience
     if (!thread_info.best_moves.empty() &&
         thread_info.best_moves[0] != MoveNone) {
-      // Depth fallback: if GUI requested fixed depth, use that as fallback
-      // (like HypnoS limits.depth fallback)
-      int effDepth = thread_info.current_iter;
-      if (thread_info.max_iter_depth > 0 &&
-          thread_info.max_iter_depth < MaxSearchDepth) {
-        effDepth =
-            std::max(effDepth, static_cast<int>(thread_info.max_iter_depth));
-      }
-
       if (effDepth >= static_cast<int>(Learning::MinDepth)) {
         Learning::add_pv_experience(
             position.zobrist_key, thread_info.best_moves[0],
@@ -2994,9 +2893,8 @@ finish:
       }
     }
 
-    // Save MultiPV experience (collect from all threads)
+    // Save MultiPV experience
     if (thread_info.multipv > 1) {
-      // Collect alternative moves from all threads
       struct UniqueMoveInfo {
         Move move;
         uint8_t depth;
@@ -3007,17 +2905,11 @@ finish:
       std::vector<UniqueMoveInfo> uniqueMoves;
       Move bestMv = thread_info.best_moves[0];
 
-      // Collect from all threads
-      for (auto &td : thread_data.thread_infos) {
-        if (td.best_moves.empty() || td.best_moves[0] == MoveNone ||
-            td.best_moves[0] == bestMv)
-          continue;
+      auto add_candidate_move = [&](Move m, uint8_t depth, int32_t score) {
+        if (m == MoveNone || m == bestMv)
+          return;
 
-        const Move m0 = td.best_moves[0];
-        UniqueMoveInfo thisMove{m0, static_cast<uint8_t>(td.current_iter),
-                                td.best_scores[0], 1};
-
-        bool merged = false;
+        UniqueMoveInfo thisMove{m, depth, score, 1};
         for (auto &um : uniqueMoves) {
           if (um.move == thisMove.move) {
             if (thisMove.depth > um.depth)
@@ -3026,12 +2918,37 @@ finish:
               um.scoreSum += thisMove.scoreSum;
               um.count++;
             }
-            merged = true;
-            break;
+            return;
           }
         }
-        if (!merged)
-          uniqueMoves.push_back(thisMove);
+        uniqueMoves.push_back(thisMove);
+      };
+
+      // 1. Primary source: thread 0's own MultiPV lines (root_moves lines 1..multipv-1)
+      const int numRootMoves = static_cast<int>(thread_info.root_moves.size());
+      const int maxPv = std::min(static_cast<int>(thread_info.multipv), numRootMoves);
+      for (int i = 1; i < maxPv; ++i) {
+        Move m = (i < static_cast<int>(thread_info.best_moves.size()))
+                     ? thread_info.best_moves[i]
+                     : MoveNone;
+        if (m == MoveNone && !thread_info.root_moves[i].pv.empty())
+          m = thread_info.root_moves[i].pv[0];
+
+        int32_t score = (i < static_cast<int>(thread_info.best_scores.size()))
+                            ? thread_info.best_scores[i]
+                            : thread_info.root_moves[i].score;
+        add_candidate_move(m, static_cast<uint8_t>(effDepth), score);
+      }
+
+      // 2. Secondary source: helper threads' best moves in SMP mode (like Stockfish-sf_19)
+      for (auto &td : thread_data.thread_infos) {
+        if (td.thread_id == 0)
+          continue;
+
+        if (!td.best_moves.empty() && td.best_moves[0] != MoveNone) {
+          add_candidate_move(td.best_moves[0], static_cast<uint8_t>(td.current_iter),
+                             td.best_scores[0]);
+        }
       }
 
       // Commit MultiPV entries
@@ -3077,7 +2994,7 @@ void search_position(Position &position, ThreadInfo &thread_info,
   reset_barrier.arrive_and_wait();
 
   for (int i = 0; i < thread_data.thread_infos.size(); i++) {
-    thread_data.thread_infos[i] = thread_info;
+    thread_data.thread_infos[i].copy_from(thread_info);
     thread_data.thread_infos[i].thread_id = i + 1;
   }
 
