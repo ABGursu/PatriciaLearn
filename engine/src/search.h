@@ -252,25 +252,6 @@ inline bool upcoming_repetition(const Position &position,
   uint64_t originalKey = position.zobrist_key;
   int end = std::min((int)halfmoves, game_ply);
 
-  // Simple hash-based check first (fast path)
-  // Check if current position matches any position 2, 4, 6... moves ago
-  int start_index = game_ply - 2;
-  int end_index = std::max(game_ply - end, 0);
-
-  // CRITICAL FIX: Ensure indices are valid (game_hist array bounds)
-  // game_ply starts at 6, so valid indices are 0-5 initially
-  if (start_index < 0 || end_index < 0)
-    return false;
-
-  for (int i = start_index; i >= end_index; i -= 2) {
-    // CRITICAL FIX: Ensure index is within bounds before accessing game_hist
-    if (i < 0 || i >= GameSize)
-      break; // Safety check
-    if (originalKey == thread_info.game_hist[i].position_key) {
-      return true;
-    }
-  }
-
   // Cuckoo-based detection for reversible moves
   // This detects if ANY legal reversing move would create a repetition
   if (end >= 3 && game_ply >= 3) {
@@ -740,10 +721,11 @@ int eval(Position &position, ThreadInfo &thread_info) {
       ((float)750 + total_mat(position, thread_info) / 25) / 1024;
 
   if (!position.material_count[root_color + 8] ||
-      total_mat(position) < 4000 &&
+      total_mat(position, thread_info) < 4000 &&
           ((eval > 0 && our_side) || (eval < 0 && !our_side))) {
     multiplier -= 0.1;
   }
+
   eval = eval * multiplier;
 
   return std::clamp(eval + bonus1 + bonus2, ScoreLost + 1, ScoreWin - 1);
@@ -768,7 +750,7 @@ int correct_eval(const Position &position, ThreadInfo &thread_info, int eval) {
 
   GameHistory *ss = &(thread_info.game_hist[thread_info.game_ply]);
 
-  if ((ss - 1)->played_move != MoveNone) {
+  if ((ss - 1)->played_move != MoveNone && (ss - 2)->played_move != MoveNone) {
     corr += thread_info.ContCorrHist[(ss - 2)->piece_moved][extract_to(
         (ss - 2)->played_move)][(ss - 1)->piece_moved]
                                     [extract_to((ss - 1)->played_move)];
@@ -787,7 +769,15 @@ void ss_push(Position &position, ThreadInfo &thread_info, Move move) {
   thread_info.game_hist[thread_info.game_ply].played_move = move;
   thread_info.game_hist[thread_info.game_ply].piece_moved =
       position.board[extract_from(move)];
-  thread_info.game_hist[thread_info.game_ply].is_cap = is_cap(position, move);
+  bool cap = is_cap(position, move);
+  thread_info.game_hist[thread_info.game_ply].is_cap = cap;
+  uint8_t cap_type = PieceTypes::PieceNone;
+  if (extract_type(move) == MoveTypes::EnPassant) {
+    cap_type = PieceTypes::Pawn;
+  } else if (cap) {
+    cap_type = get_piece_type(position.board[extract_to(move)]);
+  }
+  thread_info.game_hist[thread_info.game_ply].captured_type = cap_type;
   thread_info.game_hist[thread_info.game_ply].m_diff =
       material_eval(position, thread_info);
 
@@ -905,34 +895,7 @@ inline int qsearch(int alpha, int beta, Position &position,
   const bool addActive = add_detection_active(thread_info);
   bool gameCycle = false;
 
-  // ============================================================================
-  // Upcoming repetition: Armageddon alone, or ADD (gameCycle) path
-  // ============================================================================
-  if (addActive) {
-    if (upcoming_repetition(position, thread_info)) {
-      int drawValue = current_draw_score(position, thread_info, ply);
-      if (drawValue >= beta)
-        return drawValue;
-      gameCycle = true;
-      alpha = std::max(alpha, drawValue);
-    }
-  } else if (armageddonMode) {
-    if (upcoming_repetition(position, thread_info)) {
-      int drawValue = current_draw_score(position, thread_info, ply);
-      if (drawValue >= beta)
-        return drawValue;
-      alpha = std::max(alpha, drawValue);
-    }
-  }
 
-  // ADD BlackHole: score confirmed drawish shallow branches
-  if (addActive &&
-      DrawDetect::drawish_branch(position, thread_info, ply,
-                                 thread_info.addBlackHole,
-                                 thread_info.addStrongerSide,
-                                 thread_info.addTestPassivePlay != 0)) {
-    return current_draw_score(position, thread_info, ply);
-  }
 
   // NOTE: Original Patricia qsearch has NO is_draw check here
   // Draw detection is only in main search function
@@ -1106,29 +1069,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
   bool kingDanger = false;
   bool kingDangerThem = false;
 
-  // ============================================================================
-  // Upcoming repetition: ADD owns gameCycle path; Armageddon-alone stays simple
-  // ============================================================================
-  if (!root && addActive) {
-    if (upcoming_repetition(position, thread_info)) {
-      int drawValue = current_draw_score(position, thread_info, ply);
-      if (drawValue >= beta) {
-        mcts_sample(thread_info, ply, drawValue);
-        return drawValue;
-      }
-      gameCycle = true;
-      alpha = std::max(alpha, drawValue);
-    }
-  } else if (armageddonMode && !root) {
-    if (upcoming_repetition(position, thread_info)) {
-      int drawValue = current_draw_score(position, thread_info, ply);
-      if (drawValue >= beta) {
-        mcts_sample(thread_info, ply, drawValue);
-        return drawValue;
-      }
-      alpha = std::max(alpha, drawValue);
-    }
-  }
+
 
   // Crystal king_danger (ADD only)
   if (addActive && !root) {
@@ -1977,7 +1918,7 @@ int search(int alpha, int beta, int depth, bool cutnode, Position &position,
       mcts_sample(thread_info, ply, mate);
       return mate; // Checkmate
     }
-    int drawValue = current_draw_score(position, thread_info, ply);
+    int drawValue = armageddonMode ? current_draw_score(position, thread_info, ply) : 0;
     mcts_sample(thread_info, ply, drawValue);
     return drawValue;
   }
@@ -2119,7 +2060,15 @@ inline int armageddon_mcts_playout(Position &position, ThreadInfo &thread_info,
   if (playMove == MoveNone || !is_legal_fast_unchecked(position, playMove))
     return ScoreNone;
   if (is_draw(position, thread_info))
-    return 0;
+    return current_draw_score(position, thread_info, thread_info.search_ply);
+
+  // ADD BlackHole: score confirmed drawish branches in playout
+  if (add_detection_active(thread_info) &&
+      DrawDetect::drawish_branch(position, thread_info, thread_info.search_ply,
+                                 thread_info.addBlackHole,
+                                 thread_info.addStrongerSide,
+                                 thread_info.addTestPassivePlay != 0))
+    return current_draw_score(position, thread_info, thread_info.search_ply);
 
   const uint8_t phase = thread_info.phase;
   Position moved = position;
@@ -2219,18 +2168,19 @@ inline void add_prepare_root_depth(Position &position, ThreadInfo &thread_info,
 
   if (npm <= DrawDetect::PassivePlayMaterialBorder) {
     if (thread_info.addTestPassivePlay != 0) {
-      if ((thread_info.addTestPassivePlay > 0 &&
-           prevScore > thread_info.addTestPassivePlay) ||
-          (thread_info.addTestPassivePlay < 0 &&
-           prevScore < thread_info.addTestPassivePlay))
+      if (thread_info.addBlackHole &&
+          ((thread_info.addTestPassivePlay > 0 &&
+            prevScore > thread_info.addTestPassivePlay) ||
+           (thread_info.addTestPassivePlay < 0 &&
+            prevScore < thread_info.addTestPassivePlay)))
         thread_info.addTestPassivePlay = 0;
     }
 
     if (!thread_info.addTestPassivePlay && !thread_info.addBlackHole &&
-        depth <= 40 && depth >= 26 &&
-        thread_info.addBhBestValues[std::max(0, depth - 3)] >= prevScore &&
+        depth <= 40 && depth >= 20 &&
+        thread_info.addBhBestValues[std::max(0, depth - 3)] >= prevScore - 30 &&
         (prevScore >= 2 * MaterialValues[PieceTypes::Pawn] ||
-         prevScore <= -300))
+         prevScore <= -2 * MaterialValues[PieceTypes::Pawn]))
       thread_info.addTestPassivePlay = prevScore;
 
     if (std::abs(prevScore) >= ScoreWin / 2)
@@ -2467,8 +2417,7 @@ void iterative_deepen(
          thread_info.multipv_index < real_multi_pv;
          thread_info.multipv_index++) {
 
-      int searchAgainReduction = 3 * (searchAgainCounter + 1) / 4;
-      int temp_depth = std::max(1, depth - searchAgainReduction);
+      int temp_depth = depth;
 
       // FIX #1: Per-PV aspiration window based on this line's own statistics
       auto &curRM = thread_info.root_moves[thread_info.multipv_index];
@@ -2534,7 +2483,7 @@ void iterative_deepen(
         if (asp_iterations > 20) {
           alpha = ScoreNone;
           beta = -ScoreNone;
-          temp_depth = std::max(1, depth - searchAgainReduction);
+          temp_depth = depth;
           delta = AspStartWindow;
         }
 
@@ -2564,36 +2513,42 @@ void iterative_deepen(
                  internal_to_uci(position, asp_move).c_str());
         }
 
-        if (score <= alpha || mctsFailLow) {
-          // Sting SF BH-11 BlackHole:
-          // In fail-low, if BlackHole is active and window straddles 0 (alpha < 1),
-          // pin beta = 1 directly (repelling 0.00 without halving!).
-          // Otherwise, standard aspiration halving applies: beta = (alpha + beta) / 2.
-          if (score <= alpha && thread_info.addBlackHole &&
-              add_detection_active(thread_info) && alpha < 1) {
-            beta = 1;
-          } else {
+        if (!add_detection_active(thread_info) && !armageddonMcts) {
+          // Pristine baseline Patricia aspiration loop (zero modifications when options are OFF)
+          if (score <= alpha) {
             beta = (alpha + beta) / 2;
+            alpha -= delta;
+            temp_depth = depth;
+          } else if (score >= beta) {
+            beta += delta;
+            temp_depth = std::max(temp_depth - 1, 1);
           }
-          alpha = std::max(alpha - delta, ScoreNone);
-          temp_depth = std::max(1, depth - searchAgainReduction);
-        } else if (score >= beta) {
-          // Sting SF BH-11 BlackHole:
-          // In fail-high, if BlackHole is active and window straddles 0 (beta > -1),
-          // pin alpha = -1 directly (repelling 0.00 floor).
-          if (thread_info.addBlackHole && add_detection_active(thread_info) &&
-              beta > -1) {
-            alpha = -1;
+          delta += delta / 3;
+        } else {
+          // Armageddon Draw Detection (BlackHole) & Armageddon MCTS aspiration logic
+          if (score <= alpha || mctsFailLow) {
+            if (score <= alpha && thread_info.addBlackHole &&
+                add_detection_active(thread_info) && alpha < 1) {
+              beta = 1;
+            } else {
+              beta = (alpha + beta) / 2;
+            }
+            alpha = std::max(alpha - delta, ScoreNone);
+            temp_depth = depth;
+          } else if (score >= beta) {
+            if (thread_info.addBlackHole && add_detection_active(thread_info) &&
+                beta > -1) {
+              alpha = -1;
+            }
+            beta = std::min(beta + delta, -ScoreNone);
+            temp_depth = std::max(temp_depth - 1, 1);
           }
-          beta = std::min(beta + delta, -ScoreNone);
-          temp_depth = std::max(temp_depth - 1, 1);
-        }
-        delta += delta / 3;
+          delta += delta / 3;
 
-        // Proposal 4: Universal Guard against aspiration window inversion
-        if (alpha >= beta) {
-          alpha = ScoreNone;
-          beta = -ScoreNone;
+          if (alpha >= beta) {
+            alpha = ScoreNone;
+            beta = -ScoreNone;
+          }
         }
 
         score = search<true>(alpha, beta, temp_depth, false, position,

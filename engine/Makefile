@@ -13,6 +13,7 @@ LINKER :=
 ifeq ($(OS), Windows_NT)
 	DETECTED_OS := Windows
 	SUFFIX := .exe
+	LINKER := -static
 else
 	DETECTED_OS := $(shell uname -s)
 	LINKER := -lm

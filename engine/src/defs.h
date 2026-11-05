@@ -144,8 +144,8 @@ struct GameHistory { // keeps the state of the board at a particular point in
   Move played_move = MoveNone;         // The move that was played
   uint8_t piece_moved = Pieces::Blank; // The piece that was moved (will be
                                        // useful for histories later)
-  // int16_t sacrifice_scale;
   bool is_cap;
+  uint8_t captured_type = PieceTypes::PieceNone; // PieceTypes (Pawn, Knight, etc.)
   int16_t m_diff;
   int32_t static_eval;
   int8_t repetition = 0; // Count of times this position occurred (for Cuckoo)
